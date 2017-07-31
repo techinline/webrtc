@@ -1,0 +1,13 @@
+diff --git a/webrtc/p2p/base/p2ptransportchannel.cc b/webrtc/p2p/base/p2ptransportchannel.cc
+index 532d35c..3765bb0 100644
+--- a/webrtc/p2p/base/p2ptransportchannel.cc
++++ b/webrtc/p2p/base/p2ptransportchannel.cc
+@@ -91,7 +91,7 @@ static const int RECEIVING_SWITCHING_DELAY = 1000;  // ms
+ 
+ // We periodically check if any existing networks do not have any connection
+ // and regather on those networks.
+-static const int DEFAULT_REGATHER_ON_FAILED_NETWORKS_INTERVAL = 5 * 60 * 1000;
++static const int DEFAULT_REGATHER_ON_FAILED_NETWORKS_INTERVAL =  30 * 1000;
+ 
+ static constexpr int DEFAULT_BACKUP_CONNECTION_PING_INTERVAL = 25 * 1000;
+ 
