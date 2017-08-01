@@ -1,0 +1,27 @@
+diff --git a/config/win/BUILD.gn b/config/win/BUILD.gn
+index 940e55c..268410a 100644
+--- a/config/win/BUILD.gn
++++ b/config/win/BUILD.gn
+@@ -315,14 +315,14 @@ config("dynamic_crt") {
+   }
+ }
+ 
+-config("static_crt") {
+-  if (is_debug) {
+-    # This pulls in the static debug CRT and defines _DEBUG
+-    cflags = [ "/MTd" ]
+-  } else {
+-    cflags = [ "/MT" ]
+-  }
+-}
++ config("static_crt") {
++   if (is_debug) {
++     # This pulls in the static debug CRT and defines _DEBUG
++     cflags = [ "/MDd" ]
++   } else {
++     cflags = [ "/MD" ]
++   }
++ }
+ 
+ # Subsystem --------------------------------------------------------------------
+ 
