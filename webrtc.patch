@@ -1,3 +1,56 @@
+diff --git a/webrtc/media/sctp/sctptransport.cc b/webrtc/media/sctp/sctptransport.cc
+index b95cf8a..2cfc015 100644
+--- a/webrtc/media/sctp/sctptransport.cc
++++ b/webrtc/media/sctp/sctptransport.cc
+@@ -18,6 +18,7 @@ enum PreservedErrno {
+ };
+ }
+ 
++
+ #include "webrtc/media/sctp/sctptransport.h"
+ 
+ #include <stdarg.h>
+@@ -712,6 +713,24 @@ bool SctpTransport::ConfigureSctpSocket() {
+     return false;
+   }
+ 
++  int iv = 2;
++  if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, SCTP_FRAGMENT_INTERLEAVE,
++	  &iv, sizeof(iv))) {
++	  LOG_ERRNO(LS_ERROR) << debug_name_ << "->ConfigureSctpSocket(): "
++
++		  << "Failed to set SCTP_FRAGMENT_INTERLEAVE.";
++	  return false;
++  }
++
++  if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, 0x00001206,
++	  &stream_rst, sizeof(stream_rst))) {
++	  LOG_ERRNO(LS_ERROR) << debug_name_ << "->ConfigureSctpSocket(): "
++
++		  << "Failed to set SCTP_INTERLEAVING_SUPPORTED.";
++	  return false;
++  }
++
++
+   // Nagle.
+   uint32_t nodelay = 1;
+   if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, SCTP_NODELAY, &nodelay,
+@@ -721,6 +740,8 @@ bool SctpTransport::ConfigureSctpSocket() {
+     return false;
+   }
+ 
++
++
+   // Subscribe to SCTP event notifications.
+   int event_types[] = {SCTP_ASSOC_CHANGE, SCTP_PEER_ADDR_CHANGE,
+                        SCTP_SEND_FAILED_EVENT, SCTP_SENDER_DRY_EVENT,
+@@ -1087,4 +1108,4 @@ void SctpTransport::OnStreamResetEvent(
+   SendQueuedStreamResets();
+ }
+ 
+-}  // namespace cricket
++}  // namespace cricket
+\ No newline at end of file
 diff --git a/webrtc/p2p/base/p2ptransportchannel.cc b/webrtc/p2p/base/p2ptransportchannel.cc
 index 532d35c..3765bb0 100644
 --- a/webrtc/p2p/base/p2ptransportchannel.cc
