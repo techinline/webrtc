@@ -1,3 +1,31 @@
+diff --git a/webrtc/media/sctp/sctptransport.cc b/webrtc/media/sctp/sctptransport.cc
+index 2dcc339..7cbcee0 100644
+--- a/webrtc/media/sctp/sctptransport.cc
++++ b/webrtc/media/sctp/sctptransport.cc
+@@ -712,6 +712,23 @@ bool SctpTransport::ConfigureSctpSocket() {
+     return false;
+   }
+ 
++    int iv = 2;
++    if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, SCTP_FRAGMENT_INTERLEAVE,
++         &iv, sizeof(iv))) {
++        LOG_ERRNO(LS_ERROR) << debug_name_ << "->ConfigureSctpSocket(): "
++
++                            << "Failed to set SCTP_FRAGMENT_INTERLEAVE.";
++        return false;
++    }
++
++    if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, 0x00001206,
++        &stream_rst, sizeof(stream_rst))) {
++        LOG_ERRNO(LS_ERROR) << debug_name_ << "->ConfigureSctpSocket(): "
++
++                       << "Failed to set SCTP_INTERLEAVING_SUPPORTED.";
++        return false;
++    }
++
+   // Nagle.
+   uint32_t nodelay = 1;
+   if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, SCTP_NODELAY, &nodelay,
 diff --git a/webrtc/p2p/base/p2ptransportchannel.cc b/webrtc/p2p/base/p2ptransportchannel.cc
 index 90fe07c..d6cce52 100644
 --- a/webrtc/p2p/base/p2ptransportchannel.cc
