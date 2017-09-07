@@ -39,3 +39,352 @@ index 90fe07c..d6cce52 100644
  
  static constexpr int DEFAULT_BACKUP_CONNECTION_PING_INTERVAL = 25 * 1000;
  
+diff --git a/webrtc/api/jsep.h b/webrtc/api/jsep.h
+index cfb604d..1c29c9b 100644
+--- a/webrtc/api/jsep.h
++++ b/webrtc/api/jsep.h
+@@ -73,7 +73,8 @@ class IceCandidateInterface {
+ IceCandidateInterface* CreateIceCandidate(const std::string& sdp_mid,
+                                           int sdp_mline_index,
+                                           const std::string& sdp,
+-                                          SdpParseError* error);
++                                          SdpParseError* error,
++                                          bool local = true);
+ 
+ // This class represents a collection of candidates for a specific m= section.
+ // Used in SessionDescriptionInterface.
+diff --git a/webrtc/api/jsepicecandidate.h b/webrtc/api/jsepicecandidate.h
+index 0b34991..0561aac 100644
+--- a/webrtc/api/jsepicecandidate.h
++++ b/webrtc/api/jsepicecandidate.h
+@@ -36,9 +36,13 @@ class JsepIceCandidate : public IceCandidateInterface {
+   void SetCandidate(const cricket::Candidate& candidate) {
+     candidate_ = candidate;
+   }
+-
++  void set_is_local(bool local)
++  {
++	  candidate_.set_is_local(local);
++  }
+   virtual std::string sdp_mid() const { return sdp_mid_; }
+   virtual int sdp_mline_index() const { return sdp_mline_index_; }
++  
+   virtual const cricket::Candidate& candidate() const {
+     return candidate_;
+   }
+diff --git a/webrtc/api/peerconnectioninterface.h b/webrtc/api/peerconnectioninterface.h
+index 65c1278..95d4b79 100644
+--- a/webrtc/api/peerconnectioninterface.h
++++ b/webrtc/api/peerconnectioninterface.h
+@@ -227,9 +227,12 @@ class PeerConnectionInterface : public rtc::RefCountInterface {
+ 
+   enum TcpCandidatePolicy {
+     kTcpCandidatePolicyEnabled,
+-    kTcpCandidatePolicyDisabled
++    kTcpCandidatePolicyDisabled,
++	kTcpCandidatePolicyCreateForceEnabled,
++	kTcpCandidatePolicyCreateForceDisabled
+   };
+ 
++  
+   enum CandidateNetworkPolicy {
+     kCandidateNetworkPolicyAll,
+     kCandidateNetworkPolicyLowCost
+@@ -378,6 +381,9 @@ class PeerConnectionInterface : public rtc::RefCountInterface {
+     // Can be used to disable TCP candidate generation.
+     TcpCandidatePolicy tcp_candidate_policy = kTcpCandidatePolicyEnabled;
+ 
++	// Can be used to disable TCP candidate force generation.
++	TcpCandidatePolicy tcp_candidate_force_create_policy = kTcpCandidatePolicyCreateForceDisabled;
++
+     // Can be used to avoid gathering candidates for a "higher cost" network,
+     // if a lower cost one exists. For example, if both Wi-Fi and cellular
+     // interfaces are available, this could be used to avoid using the cellular
+diff --git a/webrtc/media/sctp/sctptransport.cc b/webrtc/media/sctp/sctptransport.cc
+index 2dcc339..7cbcee0 100644
+--- a/webrtc/media/sctp/sctptransport.cc
++++ b/webrtc/media/sctp/sctptransport.cc
+@@ -712,6 +712,23 @@ bool SctpTransport::ConfigureSctpSocket() {
+     return false;
+   }
+ 
++    int iv = 2;
++    if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, SCTP_FRAGMENT_INTERLEAVE,
++         &iv, sizeof(iv))) {
++        LOG_ERRNO(LS_ERROR) << debug_name_ << "->ConfigureSctpSocket(): "
++
++                            << "Failed to set SCTP_FRAGMENT_INTERLEAVE.";
++        return false;
++    }
++
++    if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, 0x00001206,
++        &stream_rst, sizeof(stream_rst))) {
++        LOG_ERRNO(LS_ERROR) << debug_name_ << "->ConfigureSctpSocket(): "
++
++                       << "Failed to set SCTP_INTERLEAVING_SUPPORTED.";
++        return false;
++    }
++
+   // Nagle.
+   uint32_t nodelay = 1;
+   if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, SCTP_NODELAY, &nodelay,
+diff --git a/webrtc/p2p/base/candidate.h b/webrtc/p2p/base/candidate.h
+index 474d7fb..4adf05f 100644
+--- a/webrtc/p2p/base/candidate.h
++++ b/webrtc/p2p/base/candidate.h
+@@ -88,6 +88,13 @@ class Candidate {
+     address_ = address;
+   }
+ 
++  void set_is_local(bool local)
++  {
++	  auto ip = address_.ipaddr();
++	  ip.IsLocal = local;
++	  address_.SetIP(ip);
++  }
++
+   uint32_t priority() const { return priority_; }
+   void set_priority(const uint32_t priority) { priority_ = priority; }
+ 
+diff --git a/webrtc/p2p/base/p2ptransportchannel.cc b/webrtc/p2p/base/p2ptransportchannel.cc
+index 90fe07c..d6cce52 100644
+--- a/webrtc/p2p/base/p2ptransportchannel.cc
++++ b/webrtc/p2p/base/p2ptransportchannel.cc
+@@ -92,7 +92,7 @@ static const int RECEIVING_SWITCHING_DELAY = 1000;  // ms
+ 
+ // We periodically check if any existing networks do not have any connection
+ // and regather on those networks.
+-static const int DEFAULT_REGATHER_ON_FAILED_NETWORKS_INTERVAL = 5 * 60 * 1000;
++static const int DEFAULT_REGATHER_ON_FAILED_NETWORKS_INTERVAL = 30 * 1000;
+ 
+ static constexpr int DEFAULT_BACKUP_CONNECTION_PING_INTERVAL = 25 * 1000;
+ 
+diff --git a/webrtc/p2p/base/portallocator.h b/webrtc/p2p/base/portallocator.h
+index 9540e40..a97052d 100644
+--- a/webrtc/p2p/base/portallocator.h
++++ b/webrtc/p2p/base/portallocator.h
+@@ -44,6 +44,7 @@ enum {
+   // Disable local TCP ports. This doesn't impact how we connect to relay
+   // servers.
+   PORTALLOCATOR_DISABLE_TCP = 0x08,
++  PORTALLOCATOR_FORCE_TCP_CREATE = 0x09,
+   PORTALLOCATOR_ENABLE_IPV6 = 0x40,
+   // TODO(pthatcher): Remove this once it's no longer used in:
+   // remoting/client/plugin/pepper_port_allocator.cc
+diff --git a/webrtc/p2p/client/basicportallocator.cc b/webrtc/p2p/client/basicportallocator.cc
+index 2970987..bbda650 100644
+--- a/webrtc/p2p/client/basicportallocator.cc
++++ b/webrtc/p2p/client/basicportallocator.cc
+@@ -1274,23 +1274,25 @@ void AllocationSequence::CreateUDPPorts() {
+ }
+ 
+ void AllocationSequence::CreateTCPPorts() {
+-  if (IsFlagSet(PORTALLOCATOR_DISABLE_TCP)) {
+-    LOG(LS_VERBOSE) << "AllocationSequence: TCP ports disabled, skipping.";
+-    return;
+-  }
+-
+-  Port* port = TCPPort::Create(session_->network_thread(),
+-                               session_->socket_factory(),
+-                               network_, ip_,
+-                               session_->allocator()->min_port(),
+-                               session_->allocator()->max_port(),
+-                               session_->username(), session_->password(),
+-                               session_->allocator()->allow_tcp_listen());
+-  if (port) {
+-    session_->AddAllocatedPort(port, this, true);
+-    // Since TCPPort is not created using shared socket, |port| will not be
+-    // added to the dequeue.
+-  }
++	if (IsFlagSet(PORTALLOCATOR_DISABLE_TCP)) {
++		if (!IsFlagSet(PORTALLOCATOR_FORCE_TCP_CREATE) && ip_.IsLocal) {
++			LOG(LS_VERBOSE) << "AllocationSequence: TCP ports disabled, skipping.";
++			return;
++		}
++	}
++
++	Port* port = TCPPort::Create(session_->network_thread(),
++		session_->socket_factory(),
++		network_, ip_,
++		session_->allocator()->min_port(),
++		session_->allocator()->max_port(),
++		session_->username(), session_->password(),
++		session_->allocator()->allow_tcp_listen());
++	if (port) {
++		session_->AddAllocatedPort(port, this, true);
++		// Since TCPPort is not created using shared socket, |port| will not be
++		// added to the dequeue.
++	}
+ }
+ 
+ void AllocationSequence::CreateStunPorts() {
+diff --git a/webrtc/pc/jsepicecandidate.cc b/webrtc/pc/jsepicecandidate.cc
+index dbe05e4..da18971 100644
+--- a/webrtc/pc/jsepicecandidate.cc
++++ b/webrtc/pc/jsepicecandidate.cc
+@@ -20,8 +20,10 @@ namespace webrtc {
+ IceCandidateInterface* CreateIceCandidate(const std::string& sdp_mid,
+                                           int sdp_mline_index,
+                                           const std::string& sdp,
+-                                          SdpParseError* error) {
+-  JsepIceCandidate* jsep_ice = new JsepIceCandidate(sdp_mid, sdp_mline_index);
++                                          SdpParseError* error,
++                                          bool local) {
++	JsepIceCandidate* jsep_ice = new JsepIceCandidate(sdp_mid, sdp_mline_index);
++	jsep_ice->set_is_local(local);
+   if (!jsep_ice->Initialize(sdp, error)) {
+     delete jsep_ice;
+     return NULL;
+diff --git a/webrtc/pc/peerconnection.cc b/webrtc/pc/peerconnection.cc
+index 1a5fd6c..0accd30 100644
+--- a/webrtc/pc/peerconnection.cc
++++ b/webrtc/pc/peerconnection.cc
+@@ -245,6 +245,7 @@ bool PeerConnectionInterface::RTCConfiguration::operator==(
+     rtc::Optional<bool> combined_audio_video_bwe;
+     rtc::Optional<bool> enable_dtls_srtp;
+     TcpCandidatePolicy tcp_candidate_policy;
++	TcpCandidatePolicy tcp_candidate_force_create_policy;
+     CandidateNetworkPolicy candidate_network_policy;
+     int audio_jitter_buffer_max_packets;
+     bool audio_jitter_buffer_fast_accelerate;
+@@ -294,7 +295,8 @@ bool PeerConnectionInterface::RTCConfiguration::operator==(
+          enable_ice_renomination == o.enable_ice_renomination &&
+          redetermine_role_on_ice_restart == o.redetermine_role_on_ice_restart &&
+          ice_check_min_interval == o.ice_check_min_interval &&
+-         ice_regather_interval_range == o.ice_regather_interval_range;
++         ice_regather_interval_range == o.ice_regather_interval_range &&
++         tcp_candidate_force_create_policy == o.tcp_candidate_force_create_policy;
+ }
+ 
+ bool PeerConnectionInterface::RTCConfiguration::operator!=(
+@@ -2360,6 +2362,11 @@ bool PeerConnection::InitializePortAllocator_n(
+     LOG(LS_INFO) << "TCP candidates are disabled.";
+   }
+ 
++  if (configuration.tcp_candidate_force_create_policy == kTcpCandidatePolicyCreateForceEnabled) {
++	  portallocator_flags |= cricket::PORTALLOCATOR_FORCE_TCP_CREATE;
++	  LOG(LS_INFO) << "TCP candidates are set force create.";
++  }
++
+   if (configuration.candidate_network_policy ==
+       kCandidateNetworkPolicyLowCost) {
+     portallocator_flags |= cricket::PORTALLOCATOR_DISABLE_COSTLY_NETWORKS;
+diff --git a/webrtc/rtc_base/ipaddress.h b/webrtc/rtc_base/ipaddress.h
+index 7ccea2d..e24476f 100644
+--- a/webrtc/rtc_base/ipaddress.h
++++ b/webrtc/rtc_base/ipaddress.h
+@@ -53,7 +53,7 @@ class IPAddress {
+     ::memset(&u_, 0, sizeof(u_));
+   }
+ 
+-  explicit IPAddress(const in_addr& ip4) : family_(AF_INET) {
++  explicit IPAddress(const in_addr& ip4, bool is_local = true) : family_(AF_INET), IsLocal(is_local) {
+     memset(&u_, 0, sizeof(u_));
+     u_.ip4 = ip4;
+   }
+@@ -67,6 +67,7 @@ class IPAddress {
+     u_.ip4.s_addr = HostToNetwork32(ip_in_host_byte_order);
+   }
+ 
++  bool IsLocal = true;
+   IPAddress(const IPAddress& other) : family_(other.family_) {
+     ::memcpy(&u_, &other.u_, sizeof(u_));
+   }
+diff --git a/webrtc/rtc_base/socketaddress.cc b/webrtc/rtc_base/socketaddress.cc
+index 5b26b9f..95db3eb 100644
+--- a/webrtc/rtc_base/socketaddress.cc
++++ b/webrtc/rtc_base/socketaddress.cc
+@@ -42,18 +42,20 @@ SocketAddress::SocketAddress() {
+   Clear();
+ }
+ 
+-SocketAddress::SocketAddress(const std::string& hostname, int port) {
+-  SetIP(hostname);
++SocketAddress::SocketAddress(const std::string& hostname, int port, bool local) {
++  SetIP(hostname, local);
+   SetPort(port);
+ }
+ 
+-SocketAddress::SocketAddress(uint32_t ip_as_host_order_integer, int port) {
++SocketAddress::SocketAddress(uint32_t ip_as_host_order_integer, int port, bool local) {
+   SetIP(IPAddress(ip_as_host_order_integer));
++  ip_.IsLocal = local;
+   SetPort(port);
+ }
+ 
+-SocketAddress::SocketAddress(const IPAddress& ip, int port) {
++SocketAddress::SocketAddress(const IPAddress& ip, int port, bool local) {
+   SetIP(ip);
++  ip_.IsLocal = local;
+   SetPort(port);
+ }
+ 
+@@ -86,10 +88,11 @@ SocketAddress& SocketAddress::operator=(const SocketAddress& addr) {
+   return *this;
+ }
+ 
+-void SocketAddress::SetIP(uint32_t ip_as_host_order_integer) {
++void SocketAddress::SetIP(uint32_t ip_as_host_order_integer, bool local) {
+   hostname_.clear();
+   literal_ = false;
+   ip_ = IPAddress(ip_as_host_order_integer);
++  ip_.IsLocal = local;
+   scope_id_ = 0;
+ }
+ 
+@@ -100,11 +103,13 @@ void SocketAddress::SetIP(const IPAddress& ip) {
+   scope_id_ = 0;
+ }
+ 
+-void SocketAddress::SetIP(const std::string& hostname) {
++void SocketAddress::SetIP(const std::string& hostname, bool local) {
+   hostname_ = hostname;
+   literal_ = IPFromString(hostname, &ip_);
++  ip_.IsLocal = local;
+   if (!literal_) {
+     ip_ = IPAddress();
++
+   }
+   scope_id_ = 0;
+ }
+diff --git a/webrtc/rtc_base/socketaddress.h b/webrtc/rtc_base/socketaddress.h
+index 617e355..9d12ab0 100644
+--- a/webrtc/rtc_base/socketaddress.h
++++ b/webrtc/rtc_base/socketaddress.h
+@@ -33,16 +33,16 @@ class SocketAddress {
+   // Creates the address with the given host and port. Host may be a
+   // literal IP string or a hostname to be resolved later.
+   // DCHECKs that port is in valid range (0 to 2^16-1).
+-  SocketAddress(const std::string& hostname, int port);
++  SocketAddress(const std::string& hostname, int port, bool local = true);
+ 
+   // Creates the address with the given IP and port.
+   // IP is given as an integer in host byte order. V4 only, to be deprecated.
+   // DCHECKs that port is in valid range (0 to 2^16-1).
+-  SocketAddress(uint32_t ip_as_host_order_integer, int port);
++  SocketAddress(uint32_t ip_as_host_order_integer, int port, bool = true);
+ 
+   // Creates the address with the given IP and port.
+   // DCHECKs that port is in valid range (0 to 2^16-1).
+-  SocketAddress(const IPAddress& ip, int port);
++  SocketAddress(const IPAddress& ip, int port, bool locla = true);
+ 
+   // Creates a copy of the given address.
+   SocketAddress(const SocketAddress& addr);
+@@ -61,14 +61,14 @@ class SocketAddress {
+ 
+   // Changes the IP of this address to the given one, and clears the hostname
+   // IP is given as an integer in host byte order. V4 only, to be deprecated..
+-  void SetIP(uint32_t ip_as_host_order_integer);
++  void SetIP(uint32_t ip_as_host_order_integer, bool local = true);
+ 
+   // Changes the IP of this address to the given one, and clears the hostname.
+   void SetIP(const IPAddress& ip);
+ 
+   // Changes the hostname of this address to the given one.
+   // Does not resolve the address; use Resolve to do so.
+-  void SetIP(const std::string& hostname);
++  void SetIP(const std::string& hostname, bool local = true);
+ 
+   // Sets the IP address while retaining the hostname.  Useful for bypassing
+   // DNS for a pre-resolved IP.
