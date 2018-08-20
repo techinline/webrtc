@@ -1,41 +1,39 @@
-diff --git a/webrtc/media/sctp/sctptransport.cc b/webrtc/media/sctp/sctptransport.cc
-index 2dcc339..7cbcee0 100644
---- a/webrtc/media/sctp/sctptransport.cc
-+++ b/webrtc/media/sctp/sctptransport.cc
-@@ -712,6 +712,23 @@ bool SctpTransport::ConfigureSctpSocket() {
+diff --git a/media/sctp/sctptransport.cc b/media/sctp/sctptransport.cc
+index b3459858d7..6ade809c2b 100644
+--- a/media/sctp/sctptransport.cc
++++ b/media/sctp/sctptransport.cc
+@@ -744,6 +744,21 @@ bool SctpTransport::ConfigureSctpSocket() {
      return false;
    }
  
-+    int iv = 2;
-+    if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, SCTP_FRAGMENT_INTERLEAVE,
-+         &iv, sizeof(iv))) {
-+        LOG_ERRNO(LS_ERROR) << debug_name_ << "->ConfigureSctpSocket(): "
++   int iv = 2;
++   if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, SCTP_FRAGMENT_INTERLEAVE,
++        &iv, sizeof(iv))) {
++       RTC_LOG_ERRNO(LS_ERROR) << debug_name_ << "->ConfigureSctpSocket(): "
++                           << "Failed to set SCTP_FRAGMENT_INTERLEAVE.";
++       return false;
++   }
 +
-+                            << "Failed to set SCTP_FRAGMENT_INTERLEAVE.";
-+        return false;
-+    }
-+
-+    if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, 0x00001206,
-+        &stream_rst, sizeof(stream_rst))) {
-+        LOG_ERRNO(LS_ERROR) << debug_name_ << "->ConfigureSctpSocket(): "
-+
-+                       << "Failed to set SCTP_INTERLEAVING_SUPPORTED.";
-+        return false;
-+    }
-+
++   if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, 0x00001206,
++       &stream_rst, sizeof(stream_rst))) {
++       RTC_LOG_ERRNO(LS_ERROR) << debug_name_ << "->ConfigureSctpSocket(): "
++                      << "Failed to set SCTP_INTERLEAVING_SUPPORTED.";
++       return false;
++   }  
++  
    // Nagle.
    uint32_t nodelay = 1;
    if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, SCTP_NODELAY, &nodelay,
-diff --git a/webrtc/p2p/base/p2ptransportchannel.cc b/webrtc/p2p/base/p2ptransportchannel.cc
-index 90fe07c..d6cce52 100644
---- a/webrtc/p2p/base/p2ptransportchannel.cc
-+++ b/webrtc/p2p/base/p2ptransportchannel.cc
-@@ -92,7 +92,7 @@ static const int RECEIVING_SWITCHING_DELAY = 1000;  // ms
+diff --git a/p2p/base/p2pconstants.cc b/p2p/base/p2pconstants.cc
+index 7dad2d0348..881c189880 100644
+--- a/p2p/base/p2pconstants.cc
++++ b/p2p/base/p2pconstants.cc
+@@ -47,7 +47,7 @@ const int MIN_CHECK_RECEIVING_INTERVAL = 50;
+ const int RECEIVING_TIMEOUT = MIN_CHECK_RECEIVING_INTERVAL * 50;
+ const int RECEIVING_SWITCHING_DELAY = 1000;
+ const int BACKUP_CONNECTION_PING_INTERVAL = 25 * 1000;
+-const int REGATHER_ON_FAILED_NETWORKS_INTERVAL = 5 * 60 * 1000;
++const int REGATHER_ON_FAILED_NETWORKS_INTERVAL = 30 * 1000;
  
- // We periodically check if any existing networks do not have any connection
- // and regather on those networks.
--static const int DEFAULT_REGATHER_ON_FAILED_NETWORKS_INTERVAL = 5 * 60 * 1000;
-+static const int DEFAULT_REGATHER_ON_FAILED_NETWORKS_INTERVAL = 30 * 1000;
- 
- static constexpr int DEFAULT_BACKUP_CONNECTION_PING_INTERVAL = 25 * 1000;
- 
+ // When the socket is unwritable, we will use 10 Kbps (ignoring IP+UDP headers)
+ // for pinging. When the socket is writable, we will use only 1 Kbps because we
