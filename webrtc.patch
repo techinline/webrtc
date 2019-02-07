@@ -1,34 +1,35 @@
 diff --git a/media/sctp/sctptransport.cc b/media/sctp/sctptransport.cc
-index b3459858d7..6ade809c2b 100644
+index 4ffaaf7f5a..910f82656a 100644
 --- a/media/sctp/sctptransport.cc
 +++ b/media/sctp/sctptransport.cc
-@@ -744,6 +744,21 @@ bool SctpTransport::ConfigureSctpSocket() {
+@@ -720,6 +720,22 @@ bool SctpTransport::ConfigureSctpSocket() {
      return false;
    }
  
-+   int iv = 2;
-+   if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, SCTP_FRAGMENT_INTERLEAVE,
-+        &iv, sizeof(iv))) {
-+       RTC_LOG_ERRNO(LS_ERROR) << debug_name_ << "->ConfigureSctpSocket(): "
-+                           << "Failed to set SCTP_FRAGMENT_INTERLEAVE.";
-+       return false;
-+   }
-+
-+   if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, 0x00001206,
-+       &stream_rst, sizeof(stream_rst))) {
-+       RTC_LOG_ERRNO(LS_ERROR) << debug_name_ << "->ConfigureSctpSocket(): "
-+                      << "Failed to set SCTP_INTERLEAVING_SUPPORTED.";
-+       return false;
-+   }  
 +  
++  int iv = 2;
++  if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, SCTP_FRAGMENT_INTERLEAVE,
++       &iv, sizeof(iv))) {
++      RTC_LOG_ERRNO(LS_ERROR) << debug_name_ << "->ConfigureSctpSocket(): "
++                          << "Failed to set SCTP_FRAGMENT_INTERLEAVE.";
++      return false;
++  }
++
++  if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, 0x00001206,
++      &stream_rst, sizeof(stream_rst))) {
++      RTC_LOG_ERRNO(LS_ERROR) << debug_name_ << "->ConfigureSctpSocket(): "
++                     << "Failed to set SCTP_INTERLEAVING_SUPPORTED.";
++      return false;
++  }  
++
    // Nagle.
    uint32_t nodelay = 1;
    if (usrsctp_setsockopt(sock_, IPPROTO_SCTP, SCTP_NODELAY, &nodelay,
 diff --git a/p2p/base/p2pconstants.cc b/p2p/base/p2pconstants.cc
-index 7dad2d0348..881c189880 100644
+index 41d02dd968..d885419af4 100644
 --- a/p2p/base/p2pconstants.cc
 +++ b/p2p/base/p2pconstants.cc
-@@ -47,7 +47,7 @@ const int MIN_CHECK_RECEIVING_INTERVAL = 50;
+@@ -45,7 +45,7 @@ const int MIN_CHECK_RECEIVING_INTERVAL = 50;
  const int RECEIVING_TIMEOUT = MIN_CHECK_RECEIVING_INTERVAL * 50;
  const int RECEIVING_SWITCHING_DELAY = 1000;
  const int BACKUP_CONNECTION_PING_INTERVAL = 25 * 1000;
@@ -37,3 +38,36 @@ index 7dad2d0348..881c189880 100644
  
  // When the socket is unwritable, we will use 10 Kbps (ignoring IP+UDP headers)
  // for pinging. When the socket is writable, we will use only 1 Kbps because we
+diff --git a/p2p/base/portallocator.cc b/p2p/base/portallocator.cc
+index 023e90be62..35672dcebc 100644
+--- a/p2p/base/portallocator.cc
++++ b/p2p/base/portallocator.cc
+@@ -128,7 +128,7 @@ PortAllocator::~PortAllocator() {
+ void PortAllocator::set_restrict_ice_credentials_change(bool value) {
+   restrict_ice_credentials_change_ = value;
+ }
+-
++    
+ bool PortAllocator::SetConfiguration(
+     const ServerAddresses& stun_servers,
+     const std::vector<RelayServerConfig>& turn_servers,
+diff --git a/p2p/base/portallocator.h b/p2p/base/portallocator.h
+index 7026f2b2b6..625bbc1f1e 100644
+--- a/p2p/base/portallocator.h
++++ b/p2p/base/portallocator.h
+@@ -365,6 +365,15 @@ class RTC_EXPORT PortAllocator : public sigslot::has_slots<> {
+                         const absl::optional<int>&
+                             stun_candidate_keepalive_interval = absl::nullopt);
+ 
++  bool SetConfigurationFromTitan(const ServerAddresses& stun_servers,
++                        const std::vector<RelayServerConfig>& turn_servers,
++                        int candidate_pool_size,
++                        bool prune_turn_ports,
++                        webrtc::TurnCustomizer* turn_customizer = nullptr)
++  {
++		return SetConfiguration(stun_servers, turn_servers, candidate_pool_size, prune_turn_ports, turn_customizer);
++  }
++							
+   const ServerAddresses& stun_servers() const {
+     CheckRunOnValidThreadIfInitialized();
+     return stun_servers_;

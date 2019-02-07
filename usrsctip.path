@@ -1,0 +1,36 @@
+diff --git a/usrsctplib/netinet/sctp_sysctl.h b/usrsctplib/netinet/sctp_sysctl.h
+index 4f10ff6..5658208 100755
+--- a/usrsctplib/netinet/sctp_sysctl.h
++++ b/usrsctplib/netinet/sctp_sysctl.h
+@@ -305,7 +305,7 @@ struct sctp_sysctl {
+ #define SCTPCTL_PMTU_RAISE_TIME_DESC	"Default PMTU raise timer in seconds"
+ #define SCTPCTL_PMTU_RAISE_TIME_MIN	0
+ #define SCTPCTL_PMTU_RAISE_TIME_MAX	0xFFFFFFFF
+-#define SCTPCTL_PMTU_RAISE_TIME_DEFAULT	SCTP_DEF_PMTU_RAISE_SEC
++#define SCTPCTL_PMTU_RAISE_TIME_DEFAULT	SCTPCTL_PMTU_RAISE_TIME_MIN
+ 
+ /* shutdown_guard_time: Default shutdown guard timer in seconds */
+ #define SCTPCTL_SHUTDOWN_GUARD_TIME_DESC	"Shutdown guard timer in seconds (0 means 5 times RTO.Max)"
+@@ -353,19 +353,19 @@ struct sctp_sysctl {
+ #define SCTPCTL_INIT_RTX_MAX_DESC	"Default maximum number of retransmission for INIT chunks"
+ #define SCTPCTL_INIT_RTX_MAX_MIN	0
+ #define SCTPCTL_INIT_RTX_MAX_MAX	0xFFFFFFFF
+-#define SCTPCTL_INIT_RTX_MAX_DEFAULT	SCTP_DEF_MAX_INIT
++#define SCTPCTL_INIT_RTX_MAX_DEFAULT	SCTPCTL_INIT_RTX_MAX_MAX
+ 
+ /* assoc_rtx_max: Default maximum number of retransmissions per association */
+ #define SCTPCTL_ASSOC_RTX_MAX_DESC	"Default maximum number of retransmissions per association"
+ #define SCTPCTL_ASSOC_RTX_MAX_MIN	0
+ #define SCTPCTL_ASSOC_RTX_MAX_MAX	0xFFFFFFFF
+-#define SCTPCTL_ASSOC_RTX_MAX_DEFAULT	SCTP_DEF_MAX_SEND
++#define SCTPCTL_ASSOC_RTX_MAX_DEFAULT	SCTPCTL_ASSOC_RTX_MAX_MAX
+ 
+ /* path_rtx_max: Default maximum of retransmissions per path */
+ #define SCTPCTL_PATH_RTX_MAX_DESC	"Default maximum of retransmissions per path"
+ #define SCTPCTL_PATH_RTX_MAX_MIN	0
+ #define SCTPCTL_PATH_RTX_MAX_MAX	0xFFFFFFFF
+-#define SCTPCTL_PATH_RTX_MAX_DEFAULT	SCTP_DEF_MAX_PATH_RTX
++#define SCTPCTL_PATH_RTX_MAX_DEFAULT	SCTPCTL_PATH_RTX_MAX_MAX
+ 
+ /* path_pf_threshold: threshold for considering the path potentially failed */
+ #define SCTPCTL_PATH_PF_THRESHOLD_DESC		"Default potentially failed threshold"
