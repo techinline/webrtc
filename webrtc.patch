@@ -39,7 +39,7 @@ index 41d02dd968..d885419af4 100644
  // When the socket is unwritable, we will use 10 Kbps (ignoring IP+UDP headers)
  // for pinging. When the socket is writable, we will use only 1 Kbps because we
 diff --git a/p2p/base/portallocator.cc b/p2p/base/portallocator.cc
-index 023e90be62..35672dcebc 100644
+index 023e90be62..be37e91593 100644
 --- a/p2p/base/portallocator.cc
 +++ b/p2p/base/portallocator.cc
 @@ -128,7 +128,7 @@ PortAllocator::~PortAllocator() {
@@ -51,11 +51,27 @@ index 023e90be62..35672dcebc 100644
  bool PortAllocator::SetConfiguration(
      const ServerAddresses& stun_servers,
      const std::vector<RelayServerConfig>& turn_servers,
+@@ -203,6 +203,15 @@ bool PortAllocator::SetConfiguration(
+   return true;
+ }
+ 
++bool PortAllocator::SetConfigurationFromTitan(const ServerAddresses& stun_servers,
++	const std::vector<RelayServerConfig>& turn_servers,
++	int candidate_pool_size,
++	bool prune_turn_ports,
++	webrtc::TurnCustomizer* turn_customizer)
++{
++	return SetConfiguration(stun_servers, turn_servers, candidate_pool_size, prune_turn_ports, turn_customizer);
++}
++
+ std::unique_ptr<PortAllocatorSession> PortAllocator::CreateSession(
+     const std::string& content_name,
+     int component,
 diff --git a/p2p/base/portallocator.h b/p2p/base/portallocator.h
-index 7026f2b2b6..625bbc1f1e 100644
+index 7026f2b2b6..410723f2c6 100644
 --- a/p2p/base/portallocator.h
 +++ b/p2p/base/portallocator.h
-@@ -365,6 +365,15 @@ class RTC_EXPORT PortAllocator : public sigslot::has_slots<> {
+@@ -365,6 +365,12 @@ class RTC_EXPORT PortAllocator : public sigslot::has_slots<> {
                          const absl::optional<int>&
                              stun_candidate_keepalive_interval = absl::nullopt);
  
@@ -63,11 +79,8 @@ index 7026f2b2b6..625bbc1f1e 100644
 +                        const std::vector<RelayServerConfig>& turn_servers,
 +                        int candidate_pool_size,
 +                        bool prune_turn_ports,
-+                        webrtc::TurnCustomizer* turn_customizer = nullptr)
-+  {
-+		return SetConfiguration(stun_servers, turn_servers, candidate_pool_size, prune_turn_ports, turn_customizer);
-+  }
-+							
++                        webrtc::TurnCustomizer* turn_customizer = nullptr);
++
    const ServerAddresses& stun_servers() const {
      CheckRunOnValidThreadIfInitialized();
      return stun_servers_;
