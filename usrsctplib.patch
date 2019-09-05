@@ -27,7 +27,7 @@ index c62bb85..e8c9fcb 100755
  			    TAILQ_EMPTY(&stcb->asoc.sent_queue) &&
  			    (stcb->asoc.stream_queue_cnt == 0)) {
  				sctp_ulp_notify(SCTP_NOTIFY_SENDER_DRY, stcb,  0, NULL, SCTP_SO_NOT_LOCKED);
-+//				sctp_ulp_notify(SCTP_NOTIFY_SENDER_DRY_2, stcb,  0, NULL, SCTP_SO_NOT_LOCKED);
++				sctp_ulp_notify(SCTP_NOTIFY_SENDER_DRY_2, stcb,  0, NULL, SCTP_SO_NOT_LOCKED);
  			}
 +			if (asoc->send_queue_cnt <= 5) {
 +				sctp_ulp_notify(SCTP_NOTIFY_SENDER_DRY_2, stcb,  0, NULL, SCTP_SO_NOT_LOCKED);
