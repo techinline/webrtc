@@ -1,0 +1,171 @@
+diff --git a/usrsctplib/netinet/sctp_constants.h b/usrsctplib/netinet/sctp_constants.h
+index f9a87a4..bd932ad 100755
+--- a/usrsctplib/netinet/sctp_constants.h
++++ b/usrsctplib/netinet/sctp_constants.h
+@@ -615,7 +615,7 @@ extern void getwintimeofday(struct timeval *tv);
+ #define SCTP_SEND_SEC	1
+ 
+ /* recv timer def = 200ms  */
+-#define SCTP_RECV_MSEC	200
++#define SCTP_RECV_MSEC	1
+ 
+ /* 30 seconds + RTO (in ms) */
+ #define SCTP_HB_DEFAULT_MSEC	30000
+@@ -755,6 +755,7 @@ extern void getwintimeofday(struct timeval *tv);
+ #define SCTP_NOTIFY_NO_PEER_AUTH                25
+ #define SCTP_NOTIFY_SENDER_DRY                  26
+ #define SCTP_NOTIFY_REMOTE_ERROR                27
++#define SCTP_NOTIFY_SENDER_DRY_2                28
+ 
+ /* This is the value for messages that are NOT completely
+  * copied down where we will start to split the message.
+diff --git a/usrsctplib/netinet/sctp_input.c b/usrsctplib/netinet/sctp_input.c
+index c62bb85..e8c9fcb 100755
+--- a/usrsctplib/netinet/sctp_input.c
++++ b/usrsctplib/netinet/sctp_input.c
+@@ -5221,7 +5221,13 @@ sctp_process_control(struct mbuf *m, int iphlen, int *offset, int length,
+ 			    TAILQ_EMPTY(&stcb->asoc.sent_queue) &&
+ 			    (stcb->asoc.stream_queue_cnt == 0)) {
+ 				sctp_ulp_notify(SCTP_NOTIFY_SENDER_DRY, stcb,  0, NULL, SCTP_SO_NOT_LOCKED);
++//				sctp_ulp_notify(SCTP_NOTIFY_SENDER_DRY_2, stcb,  0, NULL, SCTP_SO_NOT_LOCKED);
+ 			}
++			
++			if (asoc->send_queue_cnt <= 5) {
++				sctp_ulp_notify(SCTP_NOTIFY_SENDER_DRY_2, stcb,  0, NULL, SCTP_SO_NOT_LOCKED);
++			}
++
+ 			break;
+ 		}
+ 		case SCTP_HEARTBEAT_REQUEST:
+diff --git a/usrsctplib/netinet/sctp_sysctl.h b/usrsctplib/netinet/sctp_sysctl.h
+index 4f10ff6..5658208 100755
+--- a/usrsctplib/netinet/sctp_sysctl.h
++++ b/usrsctplib/netinet/sctp_sysctl.h
+@@ -305,7 +305,7 @@ struct sctp_sysctl {
+ #define SCTPCTL_PMTU_RAISE_TIME_DESC	"Default PMTU raise timer in seconds"
+ #define SCTPCTL_PMTU_RAISE_TIME_MIN	0
+ #define SCTPCTL_PMTU_RAISE_TIME_MAX	0xFFFFFFFF
+-#define SCTPCTL_PMTU_RAISE_TIME_DEFAULT	SCTP_DEF_PMTU_RAISE_SEC
++#define SCTPCTL_PMTU_RAISE_TIME_DEFAULT	SCTPCTL_PMTU_RAISE_TIME_MIN
+ 
+ /* shutdown_guard_time: Default shutdown guard timer in seconds */
+ #define SCTPCTL_SHUTDOWN_GUARD_TIME_DESC	"Shutdown guard timer in seconds (0 means 5 times RTO.Max)"
+@@ -353,19 +353,19 @@ struct sctp_sysctl {
+ #define SCTPCTL_INIT_RTX_MAX_DESC	"Default maximum number of retransmission for INIT chunks"
+ #define SCTPCTL_INIT_RTX_MAX_MIN	0
+ #define SCTPCTL_INIT_RTX_MAX_MAX	0xFFFFFFFF
+-#define SCTPCTL_INIT_RTX_MAX_DEFAULT	SCTP_DEF_MAX_INIT
++#define SCTPCTL_INIT_RTX_MAX_DEFAULT	SCTPCTL_INIT_RTX_MAX_MAX
+ 
+ /* assoc_rtx_max: Default maximum number of retransmissions per association */
+ #define SCTPCTL_ASSOC_RTX_MAX_DESC	"Default maximum number of retransmissions per association"
+ #define SCTPCTL_ASSOC_RTX_MAX_MIN	0
+ #define SCTPCTL_ASSOC_RTX_MAX_MAX	0xFFFFFFFF
+-#define SCTPCTL_ASSOC_RTX_MAX_DEFAULT	SCTP_DEF_MAX_SEND
++#define SCTPCTL_ASSOC_RTX_MAX_DEFAULT	SCTPCTL_ASSOC_RTX_MAX_MAX
+ 
+ /* path_rtx_max: Default maximum of retransmissions per path */
+ #define SCTPCTL_PATH_RTX_MAX_DESC	"Default maximum of retransmissions per path"
+ #define SCTPCTL_PATH_RTX_MAX_MIN	0
+ #define SCTPCTL_PATH_RTX_MAX_MAX	0xFFFFFFFF
+-#define SCTPCTL_PATH_RTX_MAX_DEFAULT	SCTP_DEF_MAX_PATH_RTX
++#define SCTPCTL_PATH_RTX_MAX_DEFAULT	SCTPCTL_PATH_RTX_MAX_MAX
+ 
+ /* path_pf_threshold: threshold for considering the path potentially failed */
+ #define SCTPCTL_PATH_PF_THRESHOLD_DESC		"Default potentially failed threshold"
+diff --git a/usrsctplib/netinet/sctp_uio.h b/usrsctplib/netinet/sctp_uio.h
+index 9d31aa1..b788827 100755
+--- a/usrsctplib/netinet/sctp_uio.h
++++ b/usrsctplib/netinet/sctp_uio.h
+@@ -590,6 +590,7 @@ union sctp_notification {
+ #define SCTP_ASSOC_RESET_EVENT                  0x000c
+ #define SCTP_STREAM_CHANGE_EVENT                0x000d
+ #define SCTP_SEND_FAILED_EVENT                  0x000e
++#define SCTP_SENDER_DRY_2_EVENT                 0x000f
+ /*
+  * socket option structs
+  */
+diff --git a/usrsctplib/netinet/sctputil.c b/usrsctplib/netinet/sctputil.c
+index 1134b50..7d6427b 100755
+--- a/usrsctplib/netinet/sctputil.c
++++ b/usrsctplib/netinet/sctputil.c
+@@ -3531,6 +3531,56 @@ sctp_notify_sender_dry_event(struct sctp_tcb *stcb,
+ 	                  &stcb->sctp_socket->so_rcv, 1, SCTP_READ_LOCK_NOT_HELD, so_locked);
+ }
+ 
++static void
++sctp_notify_sender_dry_event_2(struct sctp_tcb *stcb,
++                             int so_locked
++#if !defined(__APPLE__) && !defined(SCTP_SO_LOCK_TESTING)
++                             SCTP_UNUSED
++#endif
++                             )
++{
++	struct mbuf *m_notify;
++	struct sctp_sender_dry_event *event;
++	struct sctp_queued_to_read *control;
++
++	if ((stcb == NULL) ||
++	    sctp_stcb_is_feature_off(stcb->sctp_ep, stcb, SCTP_PCB_FLAGS_DRYEVNT)) {
++		/* event not enabled */
++		return;
++	}
++
++	m_notify = sctp_get_mbuf_for_msg(sizeof(struct sctp_sender_dry_event), 0, M_NOWAIT, 1, MT_DATA);
++	if (m_notify == NULL) {
++		/* no space left */
++		return;
++	}
++	SCTP_BUF_LEN(m_notify) = 0;
++	event = mtod(m_notify, struct sctp_sender_dry_event *);
++	memset(event, 0, sizeof(struct sctp_sender_dry_event));
++	event->sender_dry_type = SCTP_SENDER_DRY_2_EVENT;
++	event->sender_dry_flags = 0;
++	event->sender_dry_length = sizeof(struct sctp_sender_dry_event);
++	event->sender_dry_assoc_id = sctp_get_associd(stcb);
++
++	SCTP_BUF_LEN(m_notify) = sizeof(struct sctp_sender_dry_event);
++	SCTP_BUF_NEXT(m_notify) = NULL;
++
++	/* append to socket */
++	control = sctp_build_readq_entry(stcb, stcb->asoc.primary_destination,
++	                                 0, 0, stcb->asoc.context, 0, 0, 0,
++	                                 m_notify);
++	if (control == NULL) {
++		/* no memory */
++		sctp_m_freem(m_notify);
++		return;
++	}
++	control->length = SCTP_BUF_LEN(m_notify);
++	control->spec_flags = M_NOTIFICATION;
++	/* not that we need this */
++	control->tail_mbuf = m_notify;
++	sctp_add_to_readq(stcb->sctp_ep, stcb, control,
++	                  &stcb->sctp_socket->so_rcv, 1, SCTP_READ_LOCK_NOT_HELD, so_locked);
++}
+ 
+ void
+ sctp_notify_stream_reset_add(struct sctp_tcb *stcb, uint16_t numberin, uint16_t numberout, int flag)
+@@ -3967,6 +4017,9 @@ sctp_ulp_notify(uint32_t notification, struct sctp_tcb *stcb,
+ 	case SCTP_NOTIFY_SENDER_DRY:
+ 		sctp_notify_sender_dry_event(stcb, so_locked);
+ 		break;
++	case SCTP_NOTIFY_SENDER_DRY_2:
++		sctp_notify_sender_dry_event_2(stcb, so_locked);
++		break;
+ 	case SCTP_NOTIFY_REMOTE_ERROR:
+ 		sctp_notify_remote_error(stcb, error, data);
+ 		break;
+diff --git a/usrsctplib/usrsctp.h b/usrsctplib/usrsctp.h
+index e933c14..8f8f860 100644
+--- a/usrsctplib/usrsctp.h
++++ b/usrsctplib/usrsctp.h
+@@ -247,7 +247,7 @@ struct sctp_udpencaps {
+ #define SCTP_ASSOC_RESET_EVENT            0x000c
+ #define SCTP_STREAM_CHANGE_EVENT          0x000d
+ #define SCTP_SEND_FAILED_EVENT            0x000e
+-
++#define SCTP_SENDER_DRY_2_EVENT            0x000f
+ /* notification event structures */
+ 
+ 

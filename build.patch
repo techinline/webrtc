@@ -3,7 +3,7 @@ index 10f2fc8ad..e69cdf13c 100644
 --- a/config/BUILD.gn
 +++ b/config/BUILD.gn
 @@ -155,7 +155,7 @@ config("feature_flags") {
-
+ 
  config("debug") {
    defines = [
 -    "_DEBUG",
@@ -35,7 +35,7 @@ index f27f192e3..42db46918 100644
 +    cflags = [ "/MD" ]
    }
  }
-
+ 
 @@ -467,9 +467,9 @@ config("dynamic_crt") {
  config("static_crt") {
    if (is_debug) {
@@ -47,3 +47,4 @@ index f27f192e3..42db46918 100644
 +    cflags = [ "/MD" ]
    }
  }
+ 
