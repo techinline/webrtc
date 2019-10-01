@@ -1,0 +1,207 @@
+diff --git a/rtc_base/physicalsocketserver.cc b/rtc_base/physicalsocketserver.cc
+index 4ad2857c00..e37e87c730 100644
+--- a/rtc_base/physicalsocketserver.cc
++++ b/rtc_base/physicalsocketserver.cc
+@@ -1791,8 +1791,13 @@ bool PhysicalSocketServer::Wait(int cmsWait, bool process_io) {
+         if (disp->CheckSignalClose()) {
+           // We just signalled close, don't poll this socket
+         } else if (s != INVALID_SOCKET) {
+-          WSAEventSelect(s, events[0],
+-                         FlagsToEvents(disp->GetRequestedEvents()));
++          auto fx = FlagsToEvents(disp->GetRequestedEvents());
++          if (!disp->IsSubscribeToEvent(fx))
++          {
++              WSAEventSelect(s, events[0], fx);
++
++              disp->SetSubscribeEvent(fx);
++          }
+         } else {
+           events.push_back(disp->GetWSAEvent());
+           event_owners.push_back(disp);
+@@ -1840,83 +1845,89 @@ bool PhysicalSocketServer::Wait(int cmsWait, bool process_io) {
+           disp->OnPreEvent(0);
+           disp->OnEvent(0, 0);
+         }
+-      } else if (process_io) {
+-        processing_dispatchers_ = true;
+-        for (Dispatcher* disp : dispatchers_) {
+-          SOCKET s = disp->GetSocket();
+-          if (s == INVALID_SOCKET)
+-            continue;
+-
+-          WSANETWORKEVENTS wsaEvents;
+-          int err = WSAEnumNetworkEvents(s, events[0], &wsaEvents);
+-          if (err == 0) {
+-            {
+-              if ((wsaEvents.lNetworkEvents & FD_READ) &&
+-                  wsaEvents.iErrorCode[FD_READ_BIT] != 0) {
+-                RTC_LOG(WARNING)
+-                    << "PhysicalSocketServer got FD_READ_BIT error "
+-                    << wsaEvents.iErrorCode[FD_READ_BIT];
+-              }
+-              if ((wsaEvents.lNetworkEvents & FD_WRITE) &&
+-                  wsaEvents.iErrorCode[FD_WRITE_BIT] != 0) {
+-                RTC_LOG(WARNING)
+-                    << "PhysicalSocketServer got FD_WRITE_BIT error "
+-                    << wsaEvents.iErrorCode[FD_WRITE_BIT];
+-              }
+-              if ((wsaEvents.lNetworkEvents & FD_CONNECT) &&
+-                  wsaEvents.iErrorCode[FD_CONNECT_BIT] != 0) {
+-                RTC_LOG(WARNING)
+-                    << "PhysicalSocketServer got FD_CONNECT_BIT error "
+-                    << wsaEvents.iErrorCode[FD_CONNECT_BIT];
++      }
++      else
++      {
++        if (process_io) {
++          processing_dispatchers_ = true;
++          for (Dispatcher* disp : dispatchers_) {
++            SOCKET s = disp->GetSocket();
++            if (s == INVALID_SOCKET)
++              continue;
++
++            WSANETWORKEVENTS wsaEvents;
++            int err = WSAEnumNetworkEvents(s, events[0], &wsaEvents);
++            if (err == 0) {
++              {
++                if ((wsaEvents.lNetworkEvents & FD_READ) &&
++                    wsaEvents.iErrorCode[FD_READ_BIT] != 0) {
++                  RTC_LOG(WARNING)
++                      << "PhysicalSocketServer got FD_READ_BIT error "
++                      << wsaEvents.iErrorCode[FD_READ_BIT];
++                }
++                if ((wsaEvents.lNetworkEvents & FD_WRITE) &&
++                    wsaEvents.iErrorCode[FD_WRITE_BIT] != 0) {
++                  RTC_LOG(WARNING)
++                      << "PhysicalSocketServer got FD_WRITE_BIT error "
++                      << wsaEvents.iErrorCode[FD_WRITE_BIT];
++                }
++                if ((wsaEvents.lNetworkEvents & FD_CONNECT) &&
++                    wsaEvents.iErrorCode[FD_CONNECT_BIT] != 0) {
++                  RTC_LOG(WARNING)
++                      << "PhysicalSocketServer got FD_CONNECT_BIT error "
++                      << wsaEvents.iErrorCode[FD_CONNECT_BIT];
++                }
++                if ((wsaEvents.lNetworkEvents & FD_ACCEPT) &&
++                    wsaEvents.iErrorCode[FD_ACCEPT_BIT] != 0) {
++                  RTC_LOG(WARNING)
++                      << "PhysicalSocketServer got FD_ACCEPT_BIT error "
++                      << wsaEvents.iErrorCode[FD_ACCEPT_BIT];
++                }
++                if ((wsaEvents.lNetworkEvents & FD_CLOSE) &&
++                    wsaEvents.iErrorCode[FD_CLOSE_BIT] != 0) {
++                  RTC_LOG(WARNING)
++                      << "PhysicalSocketServer got FD_CLOSE_BIT error "
++                      << wsaEvents.iErrorCode[FD_CLOSE_BIT];
++                }
+               }
+-              if ((wsaEvents.lNetworkEvents & FD_ACCEPT) &&
+-                  wsaEvents.iErrorCode[FD_ACCEPT_BIT] != 0) {
+-                RTC_LOG(WARNING)
+-                    << "PhysicalSocketServer got FD_ACCEPT_BIT error "
+-                    << wsaEvents.iErrorCode[FD_ACCEPT_BIT];
++              uint32_t ff = 0;
++              int errcode = 0;
++              if (wsaEvents.lNetworkEvents & FD_READ)
++                ff |= DE_READ;
++              if (wsaEvents.lNetworkEvents & FD_WRITE)
++                ff |= DE_WRITE;
++              if (wsaEvents.lNetworkEvents & FD_CONNECT) {
++                if (wsaEvents.iErrorCode[FD_CONNECT_BIT] == 0) {
++                  ff |= DE_CONNECT;
++                } else {
++                  ff |= DE_CLOSE;
++                  errcode = wsaEvents.iErrorCode[FD_CONNECT_BIT];
++                }
+               }
+-              if ((wsaEvents.lNetworkEvents & FD_CLOSE) &&
+-                  wsaEvents.iErrorCode[FD_CLOSE_BIT] != 0) {
+-                RTC_LOG(WARNING)
+-                    << "PhysicalSocketServer got FD_CLOSE_BIT error "
+-                    << wsaEvents.iErrorCode[FD_CLOSE_BIT];
+-              }
+-            }
+-            uint32_t ff = 0;
+-            int errcode = 0;
+-            if (wsaEvents.lNetworkEvents & FD_READ)
+-              ff |= DE_READ;
+-            if (wsaEvents.lNetworkEvents & FD_WRITE)
+-              ff |= DE_WRITE;
+-            if (wsaEvents.lNetworkEvents & FD_CONNECT) {
+-              if (wsaEvents.iErrorCode[FD_CONNECT_BIT] == 0) {
+-                ff |= DE_CONNECT;
+-              } else {
++              if (wsaEvents.lNetworkEvents & FD_ACCEPT)
++                ff |= DE_ACCEPT;
++              if (wsaEvents.lNetworkEvents & FD_CLOSE) {
+                 ff |= DE_CLOSE;
+-                errcode = wsaEvents.iErrorCode[FD_CONNECT_BIT];
++                errcode = wsaEvents.iErrorCode[FD_CLOSE_BIT];
++              }
++              if (ff != 0) {
++                disp->OnPreEvent(ff);
++                disp->OnEvent(ff, errcode);
++                disp->SetSubscribeEvent(0);
+               }
+-            }
+-            if (wsaEvents.lNetworkEvents & FD_ACCEPT)
+-              ff |= DE_ACCEPT;
+-            if (wsaEvents.lNetworkEvents & FD_CLOSE) {
+-              ff |= DE_CLOSE;
+-              errcode = wsaEvents.iErrorCode[FD_CLOSE_BIT];
+-            }
+-            if (ff != 0) {
+-              disp->OnPreEvent(ff);
+-              disp->OnEvent(ff, errcode);
+             }
+           }
+-        }
+-
+-        processing_dispatchers_ = false;
+-        // Process deferred dispatchers that have been added/removed while the
+-        // events were handled above.
+-        AddRemovePendingDispatchers();
+-      }
+ 
++          processing_dispatchers_ = false;
++          // Process deferred dispatchers that have been added/removed while the
++          // events were handled above.
++          AddRemovePendingDispatchers();
++        }else
++      {
+       // Reset the network event until new activity occurs
+-      WSAResetEvent(socket_ev_);
++        WSAResetEvent(socket_ev_);
++      }
++      }
+     }
+ 
+     // Break?
+diff --git a/rtc_base/physicalsocketserver.h b/rtc_base/physicalsocketserver.h
+index ee4f936e81..b146d4adea 100644
+--- a/rtc_base/physicalsocketserver.h
++++ b/rtc_base/physicalsocketserver.h
+@@ -58,6 +58,23 @@ class Dispatcher {
+   virtual int GetDescriptor() = 0;
+   virtual bool IsDescriptorClosed() = 0;
+ #endif
++
++#if defined(WEBRTC_WIN)
++
++  bool IsSubscribeToEvent(int arg)
++  {
++    return _flags == arg;
++  }
++
++  void SetSubscribeEvent(int arg)
++  {
++    _flags = arg;
++  }
++
++  private:
++    int _flags;
++#endif
++
+ };
+ 
+ // A socket server that provides the real sockets of the underlying OS.

@@ -1,5 +1,5 @@
 diff --git a/usrsctplib/netinet/sctp_constants.h b/usrsctplib/netinet/sctp_constants.h
-index f9a87a4..bd932ad 100755
+index f9a87a4..bd932ad 100644
 --- a/usrsctplib/netinet/sctp_constants.h
 +++ b/usrsctplib/netinet/sctp_constants.h
 @@ -615,7 +615,7 @@ extern void getwintimeofday(struct timeval *tv);
@@ -20,7 +20,7 @@ index f9a87a4..bd932ad 100755
  /* This is the value for messages that are NOT completely
   * copied down where we will start to split the message.
 diff --git a/usrsctplib/netinet/sctp_input.c b/usrsctplib/netinet/sctp_input.c
-index c62bb85..e8c9fcb 100755
+index c62bb85..e8c9fcb 100644
 --- a/usrsctplib/netinet/sctp_input.c
 +++ b/usrsctplib/netinet/sctp_input.c
 @@ -5221,7 +5221,11 @@ sctp_process_control(struct mbuf *m, int iphlen, int *offset, int length,
@@ -36,7 +36,7 @@ index c62bb85..e8c9fcb 100755
  		}
  		case SCTP_HEARTBEAT_REQUEST:
 diff --git a/usrsctplib/netinet/sctp_sysctl.h b/usrsctplib/netinet/sctp_sysctl.h
-index 4f10ff6..5658208 100755
+index 4f10ff6..5658208 100644
 --- a/usrsctplib/netinet/sctp_sysctl.h
 +++ b/usrsctplib/netinet/sctp_sysctl.h
 @@ -305,7 +305,7 @@ struct sctp_sysctl {
@@ -72,7 +72,7 @@ index 4f10ff6..5658208 100755
  /* path_pf_threshold: threshold for considering the path potentially failed */
  #define SCTPCTL_PATH_PF_THRESHOLD_DESC		"Default potentially failed threshold"
 diff --git a/usrsctplib/netinet/sctp_uio.h b/usrsctplib/netinet/sctp_uio.h
-index 9d31aa1..b788827 100755
+index 9d31aa1..b788827 100644
 --- a/usrsctplib/netinet/sctp_uio.h
 +++ b/usrsctplib/netinet/sctp_uio.h
 @@ -590,6 +590,7 @@ union sctp_notification {
@@ -84,7 +84,7 @@ index 9d31aa1..b788827 100755
   * socket option structs
   */
 diff --git a/usrsctplib/netinet/sctputil.c b/usrsctplib/netinet/sctputil.c
-index 1134b50..7d6427b 100755
+index 1134b50..7d6427b 100644
 --- a/usrsctplib/netinet/sctputil.c
 +++ b/usrsctplib/netinet/sctputil.c
 @@ -3531,6 +3531,56 @@ sctp_notify_sender_dry_event(struct sctp_tcb *stcb,
