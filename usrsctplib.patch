@@ -1,5 +1,5 @@
 diff --git a/usrsctplib/netinet/sctp_cc_functions.c b/usrsctplib/netinet/sctp_cc_functions.c
-index e53e4d7..b6e6617 100755
+index e53e4d7..b6e6617 100644
 --- a/usrsctplib/netinet/sctp_cc_functions.c
 +++ b/usrsctplib/netinet/sctp_cc_functions.c
 @@ -1,4 +1,4 @@
@@ -188,7 +188,7 @@ index e53e4d7..b6e6617 100755
  		if (SCTP_BASE_SYSCTL(sctp_logging_level) & SCTP_CWND_MONITOR_ENABLE) {
  			sctp_log_cwnd(stcb, net, (net->cwnd - old_cwnd), SCTP_CWND_LOG_FROM_SAT);
 diff --git a/usrsctplib/netinet/sctp_constants.h b/usrsctplib/netinet/sctp_constants.h
-index f9a87a4..bd932ad 100755
+index f9a87a4..bd932ad 100644
 --- a/usrsctplib/netinet/sctp_constants.h
 +++ b/usrsctplib/netinet/sctp_constants.h
 @@ -615,7 +615,7 @@ extern void getwintimeofday(struct timeval *tv);
@@ -209,7 +209,7 @@ index f9a87a4..bd932ad 100755
  /* This is the value for messages that are NOT completely
   * copied down where we will start to split the message.
 diff --git a/usrsctplib/netinet/sctp_input.c b/usrsctplib/netinet/sctp_input.c
-index c62bb85..dd09152 100755
+index c62bb85..dd09152 100644
 --- a/usrsctplib/netinet/sctp_input.c
 +++ b/usrsctplib/netinet/sctp_input.c
 @@ -64,6 +64,11 @@ __FBSDID("$FreeBSD: head/sys/netinet/sctp_input.c 334725 2018-06-06 19:27:06Z tu
@@ -248,7 +248,7 @@ index c62bb85..dd09152 100755
  		}
  		case SCTP_HEARTBEAT_REQUEST:
 diff --git a/usrsctplib/netinet/sctp_sysctl.h b/usrsctplib/netinet/sctp_sysctl.h
-index 4f10ff6..5658208 100755
+index 4f10ff6..5658208 100644
 --- a/usrsctplib/netinet/sctp_sysctl.h
 +++ b/usrsctplib/netinet/sctp_sysctl.h
 @@ -305,7 +305,7 @@ struct sctp_sysctl {
@@ -284,7 +284,7 @@ index 4f10ff6..5658208 100755
  /* path_pf_threshold: threshold for considering the path potentially failed */
  #define SCTPCTL_PATH_PF_THRESHOLD_DESC		"Default potentially failed threshold"
 diff --git a/usrsctplib/netinet/sctp_uio.h b/usrsctplib/netinet/sctp_uio.h
-index 9d31aa1..b788827 100755
+index 9d31aa1..b788827 100644
 --- a/usrsctplib/netinet/sctp_uio.h
 +++ b/usrsctplib/netinet/sctp_uio.h
 @@ -590,6 +590,7 @@ union sctp_notification {
@@ -296,7 +296,7 @@ index 9d31aa1..b788827 100755
   * socket option structs
   */
 diff --git a/usrsctplib/netinet/sctp_usrreq.c b/usrsctplib/netinet/sctp_usrreq.c
-index bb5ea8e..0e86515 100755
+index bb5ea8e..0e86515 100644
 --- a/usrsctplib/netinet/sctp_usrreq.c
 +++ b/usrsctplib/netinet/sctp_usrreq.c
 @@ -7661,9 +7661,9 @@ sctp_setopt(struct socket *so, int optname, void *optval, size_t optsize,
@@ -312,7 +312,7 @@ index bb5ea8e..0e86515 100755
  					}
  				}
 diff --git a/usrsctplib/netinet/sctp_var.h b/usrsctplib/netinet/sctp_var.h
-index bc4afe9..ed1ecb0 100755
+index bc4afe9..ed1ecb0 100644
 --- a/usrsctplib/netinet/sctp_var.h
 +++ b/usrsctplib/netinet/sctp_var.h
 @@ -516,4 +516,6 @@ int sctp_accept(struct socket *, struct mbuf *);
@@ -323,7 +323,7 @@ index bc4afe9..ed1ecb0 100755
 +
  #endif /* !_NETINET_SCTP_VAR_H_ */
 diff --git a/usrsctplib/netinet/sctputil.c b/usrsctplib/netinet/sctputil.c
-index 1134b50..13cb8b7 100755
+index 1134b50..13cb8b7 100644
 --- a/usrsctplib/netinet/sctputil.c
 +++ b/usrsctplib/netinet/sctputil.c
 @@ -85,6 +85,10 @@ __FBSDID("$FreeBSD: head/sys/netinet/sctputil.c 334286 2018-05-28 13:31:47Z tuex
