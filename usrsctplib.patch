@@ -1,3 +1,192 @@
+diff --git a/usrsctplib/netinet/sctp_cc_functions.c b/usrsctplib/netinet/sctp_cc_functions.c
+index e53e4d7..b6e6617 100644
+--- a/usrsctplib/netinet/sctp_cc_functions.c
++++ b/usrsctplib/netinet/sctp_cc_functions.c
+@@ -1,4 +1,4 @@
+-/*-
++﻿/*-
+  * SPDX-License-Identifier: BSD-3-Clause
+  *
+  * Copyright (c) 2001-2007, by Cisco Systems, Inc. All rights reserved.
+@@ -64,9 +64,9 @@ sctp_enforce_cwnd_limit(struct sctp_association *assoc, struct sctp_nets *net)
+ 	if ((assoc->max_cwnd > 0) &&
+ 	    (net->cwnd > assoc->max_cwnd) &&
+ 	    (net->cwnd > (net->mtu - sizeof(struct sctphdr)))) {
+-		net->cwnd = assoc->max_cwnd ;
++		net->cwnd = SCTP_CWND_SIZE;
+ 		if (net->cwnd < (net->mtu - sizeof(struct sctphdr))) {
+-			net->cwnd = net->mtu - sizeof(struct sctphdr);
++			net->cwnd = SCTP_CWND_SIZE;
+ 		}
+ 	}
+ }
+@@ -81,7 +81,7 @@ sctp_set_initial_cc_param(struct sctp_tcb *stcb, struct sctp_nets *net)
+ 	cwnd_in_mtu = SCTP_BASE_SYSCTL(sctp_initial_cwnd);
+ 	if (cwnd_in_mtu == 0) {
+ 		/* Using 0 means that the value of RFC 4960 is used. */
+-		net->cwnd = min((net->mtu * 4), max((2 * net->mtu), SCTP_INITIAL_CWND));
++		net->cwnd = SCTP_CWND_SIZE;
+ 	} else {
+ 		/*
+ 		 * We take the minimum of the burst limit and the
+@@ -89,14 +89,14 @@ sctp_set_initial_cc_param(struct sctp_tcb *stcb, struct sctp_nets *net)
+ 		 */
+ 		if ((assoc->max_burst > 0) && (cwnd_in_mtu > assoc->max_burst))
+ 			cwnd_in_mtu = assoc->max_burst;
+-		net->cwnd = (net->mtu - sizeof(struct sctphdr)) * cwnd_in_mtu;
++		net->cwnd = SCTP_CWND_SIZE;
+ 	}
+ 	if ((stcb->asoc.sctp_cmt_on_off == SCTP_CMT_RPV1) ||
+ 	    (stcb->asoc.sctp_cmt_on_off == SCTP_CMT_RPV2)) {
+ 		/* In case of resource pooling initialize appropriately */
+ 		net->cwnd /= assoc->numnets;
+ 		if (net->cwnd < (net->mtu - sizeof(struct sctphdr))) {
+-			net->cwnd = net->mtu - sizeof(struct sctphdr);
++			net->cwnd = SCTP_CWND_SIZE;
+ 		}
+ 	}
+ 	sctp_enforce_cwnd_limit(assoc, net);
+@@ -194,7 +194,7 @@ sctp_cwnd_update_after_fr(struct sctp_tcb *stcb,
+ 						net->ssthresh = 2 * net->mtu;
+ 					}
+ 				}
+-				net->cwnd = net->ssthresh;
++				net->cwnd = SCTP_CWND_SIZE;
+ 				sctp_enforce_cwnd_limit(asoc, net);
+ #if defined(__FreeBSD__) && __FreeBSD_version >= 803000
+ 				SDT_PROBE5(sctp, cwnd, net, fr,
+@@ -1091,7 +1091,7 @@ sctp_cwnd_update_exit_pf_common(struct sctp_tcb *stcb SCTP_UNUSED, struct sctp_n
+ 
+ 	old_cwnd = net->cwnd;
+ #endif
+-	net->cwnd = net->mtu;
++	net->cwnd = SCTP_CWND_SIZE;
+ #if defined(__FreeBSD__) && __FreeBSD_version >= 803000
+ 	SDT_PROBE5(sctp, cwnd, net, ack,
+ 	          stcb->asoc.my_vtag, ((stcb->sctp_ep->sctp_lport << 16) | (stcb->rport)), net,
+@@ -1163,7 +1163,7 @@ sctp_cwnd_update_after_timeout(struct sctp_tcb *stcb, struct sctp_nets *net)
+ 	} else {
+ 		net->ssthresh = max(net->cwnd / 2, 4 * net->mtu);
+ 	}
+-	net->cwnd = net->mtu;
++	net->cwnd = SCTP_CWND_SIZE;
+ 	net->partial_bytes_acked = 0;
+ #if defined(__FreeBSD__) && __FreeBSD_version >= 803000
+ 	SDT_PROBE5(sctp, cwnd, net, to,
+@@ -1190,10 +1190,10 @@ sctp_cwnd_update_after_ecn_echo_common(struct sctp_tcb *stcb, struct sctp_nets *
+ 			 */
+ 			if (net->ecn_prev_cwnd < net->cwnd) {
+ 				/* Restore to prev cwnd */
+-				net->cwnd = net->ecn_prev_cwnd - (net->mtu * num_pkt_lost);
++				net->cwnd = SCTP_CWND_SIZE;
+ 			} else {
+ 				/* Just cut in 1/2 */
+-				net->cwnd /= 2;
++				net->cwnd = SCTP_CWND_SIZE;
+ 			}
+ 			/* Drop to CA */
+ 			net->ssthresh = net->cwnd - (num_pkt_lost * net->mtu);
+@@ -1219,7 +1219,7 @@ sctp_cwnd_update_after_ecn_echo_common(struct sctp_tcb *stcb, struct sctp_nets *
+ 				/* here back off the timer as well, to slow us down */
+ 				net->RTO <<= 1;
+ 			}
+-			net->cwnd = net->ssthresh;
++			net->cwnd = SCTP_CWND_SIZE;
+ #if defined(__FreeBSD__) && __FreeBSD_version >= 803000
+ 			SDT_PROBE5(sctp, cwnd, net, ecn,
+ 				  stcb->asoc.my_vtag,
+@@ -1283,7 +1283,7 @@ sctp_cwnd_update_after_packet_dropped(struct sctp_tcb *stcb,
+ 			 * undo any cwnd adjustment that the sack
+ 			 * might have made
+ 			 */
+-			net->cwnd = net->prev_cwnd;
++			net->cwnd = SCTP_CWND_SIZE;
+ 		}
+ 		/* Now how much of that is mine? */
+ 		seg_inflight = net->flight_size / net->mtu;
+@@ -1314,7 +1314,7 @@ sctp_cwnd_update_after_packet_dropped(struct sctp_tcb *stcb,
+ 
+ 		/* we will NOT back down more than 1 MTU */
+ 		if (net->cwnd <= net->mtu) {
+-			net->cwnd = net->mtu;
++			net->cwnd = SCTP_CWND_SIZE;
+ 		}
+ 		/* force into CA */
+ 		net->ssthresh = net->cwnd - 1;
+@@ -1332,11 +1332,11 @@ sctp_cwnd_update_after_packet_dropped(struct sctp_tcb *stcb,
+ 	}
+ 	if (net->cwnd > bw_avail) {
+ 		/* We can't exceed the pipe size */
+-		net->cwnd = bw_avail;
++		net->cwnd = SCTP_CWND_SIZE;
+ 	}
+ 	if (net->cwnd < net->mtu) {
+ 		/* We always have 1 MTU */
+-		net->cwnd = net->mtu;
++		net->cwnd = SCTP_CWND_SIZE;
+ 	}
+ 	sctp_enforce_cwnd_limit(&stcb->asoc, net);
+ 	if (net->cwnd - old_cwnd != 0) {
+@@ -1364,7 +1364,7 @@ sctp_cwnd_update_after_output(struct sctp_tcb *stcb,
+ 	if (net->ssthresh < net->cwnd)
+ 		net->ssthresh = net->cwnd;
+ 	if (burst_limit) {
+-		net->cwnd = (net->flight_size + (burst_limit * net->mtu));
++		net->cwnd = SCTP_CWND_SIZE;
+ 		sctp_enforce_cwnd_limit(&stcb->asoc, net);
+ #if defined(__FreeBSD__) && __FreeBSD_version >= 803000
+ 		SDT_PROBE5(sctp, cwnd, net, bl,
+@@ -1747,12 +1747,12 @@ sctp_hs_cwnd_decrease(struct sctp_tcb *stcb, struct sctp_nets *net)
+ 		if (net->ssthresh < (net->mtu * 2)) {
+ 			net->ssthresh = 2 * net->mtu;
+ 		}
+-		net->cwnd = net->ssthresh;
++		net->cwnd = SCTP_CWND_SIZE;
+ 	} else {
+ 		/* drop by the proper amount */
+ 		net->ssthresh = net->cwnd - (int)((net->cwnd / 100) *
+ 		    (int32_t)sctp_cwnd_adjust[net->last_hs_used].drop_percent);
+-		net->cwnd = net->ssthresh;
++		net->cwnd = SCTP_CWND_SIZE;
+ 		/* now where are we */
+ 		indx = net->last_hs_used;
+ 		cur_val = net->cwnd >> 10;
+@@ -2217,7 +2217,7 @@ sctp_htcp_set_initial_cc_param(struct sctp_tcb *stcb, struct sctp_nets *net)
+ 	 * We take the max of the burst limit times a MTU or the
+ 	 * INITIAL_CWND. We then limit this to 4 MTU's of sending.
+ 	 */
+-	net->cwnd = min((net->mtu * 4), max((2 * net->mtu), SCTP_INITIAL_CWND));
++	net->cwnd = SCTP_CWND_SIZE;
+ 	net->ssthresh = stcb->asoc.peers_rwnd;
+ 	sctp_enforce_cwnd_limit(&stcb->asoc, net);
+ 	htcp_init(net);
+@@ -2320,7 +2320,7 @@ sctp_htcp_cwnd_update_after_fr(struct sctp_tcb *stcb,
+ 				/* JRS - reset as if state were changed */
+ 				htcp_reset(&net->cc_mod.htcp_ca);
+ 				net->ssthresh = htcp_recalc_ssthresh(net);
+-				net->cwnd = net->ssthresh;
++				net->cwnd = SCTP_CWND_SIZE;
+ 				sctp_enforce_cwnd_limit(asoc, net);
+ 				if (SCTP_BASE_SYSCTL(sctp_logging_level) & SCTP_CWND_MONITOR_ENABLE) {
+ 					sctp_log_cwnd(stcb, net, (net->cwnd - old_cwnd),
+@@ -2376,7 +2376,7 @@ sctp_htcp_cwnd_update_after_timeout(struct sctp_tcb *stcb,
+ 		/* JRS - reset as if the state were being changed to timeout */
+ 		htcp_reset(&net->cc_mod.htcp_ca);
+ 		net->ssthresh = htcp_recalc_ssthresh(net);
+-		net->cwnd = net->mtu;
++		net->cwnd = SCTP_CWND_SIZE;
+ 		net->partial_bytes_acked = 0;
+ 		if (SCTP_BASE_SYSCTL(sctp_logging_level) & SCTP_CWND_MONITOR_ENABLE) {
+ 			sctp_log_cwnd(stcb, net, net->cwnd - old_cwnd, SCTP_CWND_LOG_FROM_RTX);
+@@ -2400,7 +2400,7 @@ sctp_htcp_cwnd_update_after_ecn_echo(struct sctp_tcb *stcb,
+ 			/* here back off the timer as well, to slow us down */
+ 			net->RTO <<= 1;
+ 		}
+-		net->cwnd = net->ssthresh;
++		net->cwnd = SCTP_CWND_SIZE;
+ 		sctp_enforce_cwnd_limit(&stcb->asoc, net);
+ 		if (SCTP_BASE_SYSCTL(sctp_logging_level) & SCTP_CWND_MONITOR_ENABLE) {
+ 			sctp_log_cwnd(stcb, net, (net->cwnd - old_cwnd), SCTP_CWND_LOG_FROM_SAT);
 diff --git a/usrsctplib/netinet/sctp_constants.h b/usrsctplib/netinet/sctp_constants.h
 index f9a87a4..bd932ad 100644
 --- a/usrsctplib/netinet/sctp_constants.h
@@ -20,18 +209,41 @@ index f9a87a4..bd932ad 100644
  /* This is the value for messages that are NOT completely
   * copied down where we will start to split the message.
 diff --git a/usrsctplib/netinet/sctp_input.c b/usrsctplib/netinet/sctp_input.c
-index c62bb85..e8c9fcb 100644
+index c62bb85..dd09152 100644
 --- a/usrsctplib/netinet/sctp_input.c
 +++ b/usrsctplib/netinet/sctp_input.c
-@@ -5221,7 +5221,11 @@ sctp_process_control(struct mbuf *m, int iphlen, int *offset, int length,
+@@ -64,6 +64,11 @@ __FBSDID("$FreeBSD: head/sys/netinet/sctp_input.c 334725 2018-06-06 19:27:06Z tu
+ #define APPLE_FILE_NO 2
+ #endif
+ 
++__declspec( dllexport ) uint32_t cwnd_window = 0;
++__declspec( dllexport ) uint32_t cwr_window_tsn = 0;
++__declspec( dllexport ) uint32_t last_cwr_tsn = 0;
++
++__declspec( dllexport ) uint32_t rtt_mtu = 0;
+ 
+ static void
+ sctp_stop_all_cookie_timers(struct sctp_tcb *stcb)
+@@ -5221,7 +5226,21 @@ sctp_process_control(struct mbuf *m, int iphlen, int *offset, int length,
  			    TAILQ_EMPTY(&stcb->asoc.sent_queue) &&
  			    (stcb->asoc.stream_queue_cnt == 0)) {
  				sctp_ulp_notify(SCTP_NOTIFY_SENDER_DRY, stcb,  0, NULL, SCTP_SO_NOT_LOCKED);
+-			}
 +				sctp_ulp_notify(SCTP_NOTIFY_SENDER_DRY_2, stcb,  0, NULL, SCTP_SO_NOT_LOCKED);
- 			}
++			}
 +			if (asoc->send_queue_cnt <= 5) {
 +				sctp_ulp_notify(SCTP_NOTIFY_SENDER_DRY_2, stcb,  0, NULL, SCTP_SO_NOT_LOCKED);
 +			}
++
++//			int smooth = (*netp)->lastsa >> SCTP_RTT_SHIFT;
++//			sctp_smooth_rtt = smooth;
++			cwnd_window = (*netp)->cwnd;
++
++			rtt_mtu = (*netp)->mtu;
++
++			cwr_window_tsn = (*netp)->cwr_window_tsn;
++			last_cwr_tsn = (*netp)->last_cwr_tsn;
++
  			break;
  		}
  		case SCTP_HEARTBEAT_REQUEST:
@@ -83,11 +295,59 @@ index 9d31aa1..b788827 100644
  /*
   * socket option structs
   */
+diff --git a/usrsctplib/netinet/sctp_usrreq.c b/usrsctplib/netinet/sctp_usrreq.c
+index bb5ea8e..0e86515 100644
+--- a/usrsctplib/netinet/sctp_usrreq.c
++++ b/usrsctplib/netinet/sctp_usrreq.c
+@@ -7661,9 +7661,9 @@ sctp_setopt(struct socket *so, int optname, void *optval, size_t optsize,
+ 				TAILQ_FOREACH(net, &stcb->asoc.nets, sctp_next) {
+ 					if ((net->cwnd > stcb->asoc.max_cwnd) &&
+ 					    (net->cwnd > (net->mtu - sizeof(struct sctphdr)))) {
+-						net->cwnd = stcb->asoc.max_cwnd;
++						net->cwnd = SCTP_CWND_SIZE;
+ 						if (net->cwnd < (net->mtu - sizeof(struct sctphdr))) {
+-							net->cwnd = net->mtu - sizeof(struct sctphdr);
++							net->cwnd = SCTP_CWND_SIZE;
+ 						}
+ 					}
+ 				}
+diff --git a/usrsctplib/netinet/sctp_var.h b/usrsctplib/netinet/sctp_var.h
+index bc4afe9..ed1ecb0 100644
+--- a/usrsctplib/netinet/sctp_var.h
++++ b/usrsctplib/netinet/sctp_var.h
+@@ -516,4 +516,6 @@ int sctp_accept(struct socket *, struct mbuf *);
+ 
+ #endif /* _KERNEL */
+ 
++#define SCTP_CWND_SIZE 262144
++
+ #endif /* !_NETINET_SCTP_VAR_H_ */
 diff --git a/usrsctplib/netinet/sctputil.c b/usrsctplib/netinet/sctputil.c
-index 1134b50..7d6427b 100644
+index 1134b50..13cb8b7 100644
 --- a/usrsctplib/netinet/sctputil.c
 +++ b/usrsctplib/netinet/sctputil.c
-@@ -3531,6 +3531,56 @@ sctp_notify_sender_dry_event(struct sctp_tcb *stcb,
+@@ -85,6 +85,10 @@ __FBSDID("$FreeBSD: head/sys/netinet/sctputil.c 334286 2018-05-28 13:31:47Z tuex
+ #endif
+ #endif
+ 
++//extern "C" uint32_t sctp_smooth_rtt;
++
++__declspec( dllexport ) uint32_t sctp_smooth_rtt = 0;
++
+ extern const struct sctp_cc_functions sctp_cc_functions[];
+ extern const struct sctp_ss_functions sctp_ss_functions[];
+ 
+@@ -2651,6 +2655,9 @@ sctp_calculate_rto(struct sctp_tcb *stcb,
+ 	if (new_rto > stcb->asoc.maxrto) {
+ 		new_rto = stcb->asoc.maxrto;
+ 	}
++
++	sctp_smooth_rtt = net->lastsa >> SCTP_RTT_SHIFT;
++
+ 	/* we are now returning the RTO */
+ 	return (new_rto);
+ }
+@@ -3531,6 +3538,56 @@ sctp_notify_sender_dry_event(struct sctp_tcb *stcb,
  	                  &stcb->sctp_socket->so_rcv, 1, SCTP_READ_LOCK_NOT_HELD, so_locked);
  }
  
@@ -144,7 +404,7 @@ index 1134b50..7d6427b 100644
  
  void
  sctp_notify_stream_reset_add(struct sctp_tcb *stcb, uint16_t numberin, uint16_t numberout, int flag)
-@@ -3967,6 +4017,9 @@ sctp_ulp_notify(uint32_t notification, struct sctp_tcb *stcb,
+@@ -3967,6 +4024,9 @@ sctp_ulp_notify(uint32_t notification, struct sctp_tcb *stcb,
  	case SCTP_NOTIFY_SENDER_DRY:
  		sctp_notify_sender_dry_event(stcb, so_locked);
  		break;
@@ -167,3 +427,4 @@ index e933c14..8f8f860 100644
  /* notification event structures */
  
  
+ /* association change event */
