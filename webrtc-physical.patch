@@ -1,26 +1,496 @@
+From c8ab3b82a1431e9209d58ee944919956f88c453f Mon Sep 17 00:00:00 2001
+From: Igor Ulitin <iulitin@techinline.com>
+Date: Fri, 17 Apr 2020 14:41:49 +0400
+Subject: [PATCH] Multievents: 1 socket = 1 event Multithread if sockets > 64
+
+---
+ rtc_base/physicalsocketserver.cc | 548 ++++++++++++++++++++++---------
+ rtc_base/physicalsocketserver.h  |  42 ++-
+ 2 files changed, 431 insertions(+), 159 deletions(-)
+
 diff --git a/rtc_base/physicalsocketserver.cc b/rtc_base/physicalsocketserver.cc
-index 4ad2857c00..e37e87c730 100644
+index 4ad2857c00..93cbac42da 100644
 --- a/rtc_base/physicalsocketserver.cc
 +++ b/rtc_base/physicalsocketserver.cc
-@@ -1791,8 +1791,13 @@ bool PhysicalSocketServer::Wait(int cmsWait, bool process_io) {
-         if (disp->CheckSignalClose()) {
-           // We just signalled close, don't poll this socket
-         } else if (s != INVALID_SOCKET) {
+@@ -101,7 +101,63 @@ typedef char* SockOptArg;
+ #endif
+ 
+ namespace rtc {
++#if defined(WEBRTC_WIN)
++
++class WsaEventListener {
++ public:
++  WsaEventListener(
++      std::shared_ptr<PhysicalSocketServer::ThreadDescriptor> threadDescriptor)
++      : _threadDescriptor(std::move(threadDescriptor)),
++        _thread(CreateThread(nullptr,
++                             1024 * 2,
++                             WsaEventListener::Run,
++                             _threadDescriptor.get(),
++                             STACK_SIZE_PARAM_IS_A_RESERVATION,
++                             nullptr)) {}
++  WsaEventListener(const WsaEventListener&) = delete;
++  ~WsaEventListener() {
++    WSASetEvent(_threadDescriptor->SignalEvent);
++
++    _threadDescriptor->Started = false;
++    WSASetEvent(_threadDescriptor->Events[0]);
++    WSASetEvent(_threadDescriptor->StartEvent);
++
++    DWORD res;
++    if (GetExitCodeThread(_thread, &res) != 0)
++      WaitForSingleObject(_thread, INFINITE);
++    CloseHandle(_thread);
++  }
++
++  auto StartIteration() {
++    WSAResetEvent(_threadDescriptor->SignalEvent);
++    WSASetEvent(_threadDescriptor->StartEvent);
++  }
+ 
++ private:
++  static DWORD WINAPI Run(LPVOID arg) {
++    auto threadDescriptor =
++        reinterpret_cast<PhysicalSocketServer::ThreadDescriptor*>(arg);
++
++    WSASetEvent(threadDescriptor->SignalEvent);
++    WaitForSingleObject(threadDescriptor->StartEvent, INFINITE);
++    WSAResetEvent(threadDescriptor->StartEvent);
++
++    while (threadDescriptor->Started) {
++      threadDescriptor->Result = WSAWaitForMultipleEvents(
++          static_cast<DWORD>(threadDescriptor->Events.size()),
++          &threadDescriptor->Events[0], false, INFINITE, false);
++
++      WSASetEvent(threadDescriptor->SignalEvent);
++      WaitForSingleObject(threadDescriptor->StartEvent, INFINITE);
++      WSAResetEvent(threadDescriptor->StartEvent);
++    }
++    return 0;
++  }
++ 
++  std::shared_ptr<PhysicalSocketServer::ThreadDescriptor> _threadDescriptor;
++  HANDLE _thread;
++};
++#endif
+ std::unique_ptr<SocketServer> SocketServer::CreateDefault() {
+ #if defined(__native_client__)
+   return std::unique_ptr<SocketServer>(new rtc::NullSocketServer);
+@@ -319,7 +375,7 @@ int PhysicalSocket::Send(const void* pv, size_t cb) {
+ #else
+       0
+ #endif
+-      );
++  );
+   UpdateLastError();
+   MaybeRemapSendError();
+   // We have seen minidumps where this may be false.
+@@ -565,7 +621,8 @@ SocketDispatcher::SocketDispatcher(PhysicalSocketServer* ss)
+ #if defined(WEBRTC_WIN)
+     : PhysicalSocket(ss),
+       id_(0),
+-      signal_close_(false)
++      signal_close_(false),
++      hev_(WSACreateEvent())
+ #else
+     : PhysicalSocket(ss)
+ #endif
+@@ -576,7 +633,8 @@ SocketDispatcher::SocketDispatcher(SOCKET s, PhysicalSocketServer* ss)
+ #if defined(WEBRTC_WIN)
+     : PhysicalSocket(ss, s),
+       id_(0),
+-      signal_close_(false)
++      signal_close_(false),
++      hev_(WSACreateEvent())
+ #else
+     : PhysicalSocket(ss, s)
+ #endif
+@@ -585,6 +643,9 @@ SocketDispatcher::SocketDispatcher(SOCKET s, PhysicalSocketServer* ss)
+ 
+ SocketDispatcher::~SocketDispatcher() {
+   Close();
++#if defined(WEBRTC_WIN)
++  WSACloseEvent(hev_);
++#endif
+ }
+ 
+ bool SocketDispatcher::Initialize() {
+@@ -632,7 +693,7 @@ bool SocketDispatcher::Create(int family, int type) {
+ #if defined(WEBRTC_WIN)
+ 
+ WSAEVENT SocketDispatcher::GetWSAEvent() {
+-  return WSA_INVALID_EVENT;
++  return hev_;
+ }
+ 
+ SOCKET SocketDispatcher::GetSocket() {
+@@ -1113,9 +1174,6 @@ class EventDispatcher : public Dispatcher {
+  public:
+   EventDispatcher(PhysicalSocketServer* ss) : ss_(ss) {
+     hev_ = WSACreateEvent();
+-    if (hev_) {
+-      ss_->Add(this);
+-    }
+   }
+ 
+   ~EventDispatcher() override {
+@@ -1176,16 +1234,14 @@ PhysicalSocketServer::PhysicalSocketServer() : fWait_(false) {
+     epoll_fd_ = INVALID_SOCKET;
+   }
+ #endif
+-  signal_wakeup_ = new Signaler(this, &fWait_);
+ #if defined(WEBRTC_WIN)
+-  socket_ev_ = WSACreateEvent();
++  GetSystemInfo(&system_info_);
+ #endif
++  signal_wakeup_ = new Signaler(this, &fWait_);
++  Add(signal_wakeup_);
+ }
+ 
+ PhysicalSocketServer::~PhysicalSocketServer() {
+-#if defined(WEBRTC_WIN)
+-  WSACloseEvent(socket_ev_);
+-#endif
+ #if defined(WEBRTC_POSIX)
+   signal_dispatcher_.reset();
+ #endif
+@@ -1243,6 +1299,19 @@ void PhysicalSocketServer::Add(Dispatcher* pdispatcher) {
+     pending_add_dispatchers_.insert(pdispatcher);
+   } else {
+     dispatchers_.insert(pdispatcher);
++#if defined(WEBRTC_WIN)
++
++    auto s = pdispatcher->GetSocket();
++    if (s != INVALID_SOCKET) {
++      WSAEventSelect(s, pdispatcher->GetWSAEvent(),
++                     FlagsToEvents(pdispatcher->GetRequestedEvents()));
++    }
++
++    _events.emplace_back(pdispatcher->GetWSAEvent());
++    _dispatchers.emplace_back(pdispatcher);
++    ++socketCount_;
++    RebalanceEvents();
++#endif
+   }
+ #if defined(WEBRTC_USE_EPOLL)
+   if (epoll_fd_ != INVALID_SOCKET) {
+@@ -1273,6 +1342,24 @@ void PhysicalSocketServer::Remove(Dispatcher* pdispatcher) {
+         << "dispatcher, potentially from a duplicate call to Add.";
+     return;
+   }
++#if defined(WEBRTC_WIN)
++  else {
++    auto s = pdispatcher->GetSocket();
++    if (s != INVALID_SOCKET) {
++      WSAEventSelect(s, pdispatcher->GetWSAEvent(), 0);
++    }
++
++    for (auto i = 0u; i < _dispatchers.size(); ++i) {
++      if (_dispatchers[i] == pdispatcher) {
++        _events.erase(_events.begin() + i);
++        _dispatchers.erase(_dispatchers.begin() + i);
++        break;
++      }
++    }
++    --socketCount_;
++    RebalanceEvents();
++  }
++#endif
+ #if defined(WEBRTC_USE_EPOLL)
+   if (epoll_fd_ != INVALID_SOCKET) {
+     RemoveEpoll(pdispatcher);
+@@ -1298,6 +1385,17 @@ void PhysicalSocketServer::Update(Dispatcher* pdispatcher) {
+ void PhysicalSocketServer::AddRemovePendingDispatchers() {
+   if (!pending_add_dispatchers_.empty()) {
+     for (Dispatcher* pdispatcher : pending_add_dispatchers_) {
++#if defined(WEBRTC_WIN)
++      auto s = pdispatcher->GetSocket();
++      if (s != INVALID_SOCKET) {
++        WSAEventSelect(s, pdispatcher->GetWSAEvent(),
++                       FlagsToEvents(pdispatcher->GetRequestedEvents()));
++      }
++      _events.emplace_back(pdispatcher->GetWSAEvent());
++      _dispatchers.emplace_back(pdispatcher);
++      ++socketCount_;
++      RebalanceEvents();
++#endif
+       dispatchers_.insert(pdispatcher);
+     }
+     pending_add_dispatchers_.clear();
+@@ -1305,6 +1403,22 @@ void PhysicalSocketServer::AddRemovePendingDispatchers() {
+ 
+   if (!pending_remove_dispatchers_.empty()) {
+     for (Dispatcher* pdispatcher : pending_remove_dispatchers_) {
++#if defined(WEBRTC_WIN)
++      auto s = pdispatcher->GetSocket();
++      if (s != INVALID_SOCKET) {
++        WSAEventSelect(s, pdispatcher->GetWSAEvent(), 0);
++      }
++
++      for (auto i = 0u; i < _dispatchers.size(); ++i) {
++        if (_dispatchers[i] == pdispatcher) {
++          _events.erase(_events.begin() + i);
++          _dispatchers.erase(_dispatchers.begin() + i);
++          break;
++        }
++      }
++      --socketCount_;
++      RebalanceEvents();
++#endif
+       dispatchers_.erase(pdispatcher);
+     }
+     pending_remove_dispatchers_.clear();
+@@ -1763,174 +1877,294 @@ bool PhysicalSocketServer::InstallSignal(int signum, void (*handler)(int)) {
+ }
+ #endif  // WEBRTC_POSIX
+ 
++//#define WEBRTC_WIN 1
+ #if defined(WEBRTC_WIN)
+ bool PhysicalSocketServer::Wait(int cmsWait, bool process_io) {
+-  int64_t cmsTotal = cmsWait;
+-  int64_t cmsElapsed = 0;
+-  int64_t msStart = Time();
+-
++  const int64_t cmsTotal = cmsWait;
++  const int64_t msStart = Time();
++  auto result = true;
+   fWait_ = true;
+-  while (fWait_) {
+-    std::vector<WSAEVENT> events;
+-    std::vector<Dispatcher*> event_owners;
+ 
+-    events.push_back(socket_ev_);
++  CritScope cr(&crit_);
++  // TODO(jbauch): Support re-entrant waiting.
++  RTC_DCHECK(!processing_dispatchers_);
++  // Calling "CheckSignalClose" might remove a closed dispatcher from the
++  // set. This must be deferred to prevent invalidating the iterator.
++  processing_dispatchers_ = true;
+ 
+-    {
+-      CritScope cr(&crit_);
+-      // TODO(jbauch): Support re-entrant waiting.
+-      RTC_DCHECK(!processing_dispatchers_);
++  std::function<int64_t()> calcNextTime;
++  if (cmsWait == kForever) {
++    calcNextTime = [cmsTotal, msStart]() { return cmsTotal; };
++  } else {
++    calcNextTime = [cmsTotal, msStart]() {
++      return std::max<int64_t>(0, cmsTotal - TimeSince(msStart));
++    };
++  }
+ 
+-      // Calling "CheckSignalClose" might remove a closed dispatcher from the
+-      // set. This must be deferred to prevent invalidating the iterator.
+-      processing_dispatchers_ = true;
+-      for (Dispatcher* disp : dispatchers_) {
+-        if (!process_io && (disp != signal_wakeup_))
+-          continue;
+-        SOCKET s = disp->GetSocket();
+-        if (disp->CheckSignalClose()) {
+-          // We just signalled close, don't poll this socket
+-        } else if (s != INVALID_SOCKET) {
 -          WSAEventSelect(s, events[0],
 -                         FlagsToEvents(disp->GetRequestedEvents()));
-+          auto fx = FlagsToEvents(disp->GetRequestedEvents());
-+          if (!disp->IsSubscribeToEvent(fx))
-+          {
-+              WSAEventSelect(s, events[0], fx);
+-        } else {
+-          events.push_back(disp->GetWSAEvent());
+-          event_owners.push_back(disp);
+-        }
+-      }
++  std::function<bool(PhysicalSocketServer&, int64_t, bool)> WaitFunction;
+ 
+-      processing_dispatchers_ = false;
+-      // Process deferred dispatchers that have been added/removed while the
+-      // events were handled above.
+-      AddRemovePendingDispatchers();
++  if (active_eventListeners_) {
++	  for (auto i = 0u; i < active_eventListeners_; ++i) {
++		_eventListeners[i]->StartIteration();
++	  }
++	  WaitFunction = &PhysicalSocketServer::MultiThreadWait;
++  } else {
++	  WaitFunction = &PhysicalSocketServer::SingleThreadWait;
++  }
 +
-+              disp->SetSubscribeEvent(fx);
-+          }
-         } else {
-           events.push_back(disp->GetWSAEvent());
-           event_owners.push_back(disp);
-@@ -1840,83 +1845,89 @@ bool PhysicalSocketServer::Wait(int cmsWait, bool process_io) {
-           disp->OnPreEvent(0);
-           disp->OnEvent(0, 0);
++  while (fWait_) {
++    DWORD cmsNext = calcNextTime();
++    if (WaitFunction(*this, cmsNext, process_io))
++      break;
++  }
++
++  processing_dispatchers_ = false;
++  // Process deferred dispatchers that have been added/removed while the
++  // events were handled above.
++  AddRemovePendingDispatchers();
++  // Done
++  return result;
++}
++
++bool PhysicalSocketServer::SingleThreadWait(int64_t cmsNext, bool process_io) {
++  // Wait for one of the events to signal
++  DWORD dw =
++      WSAWaitForMultipleEvents(static_cast<DWORD>(_events.size()), &_events[0],
++                               false, static_cast<DWORD>(cmsNext), false);
++
++  auto finished = false;
++  if (dw == WSA_WAIT_FAILED) {
++    // Failed?
++    // TODO(pthatcher): need a better strategy than this!
++    WSAGetLastError();
++    RTC_NOTREACHED();
++    finished = true;
++  } else if (dw == WSA_WAIT_TIMEOUT) {
++    // Timeout?
++    finished = true;
++  } else {
++    // Figure out which one it is and call it
++    unsigned int index = dw - WSA_WAIT_EVENT_0;
++    ProcessEvent(_dispatchers[index], _events[index], process_io);
++
++    for (++index; index < _events.size();) {
++      dw = WSAWaitForMultipleEvents(static_cast<DWORD>(_events.size() - index),
++                                    &_events[index], false, 0, false);
++      if (dw == WSA_WAIT_FAILED || dw == WSA_WAIT_TIMEOUT) {
++        break;
++      } else {
++        index += dw - WSA_WAIT_EVENT_0;
++        ProcessEvent(_dispatchers[index], _events[index], process_io);
++        ++index;
++      }
+     }
++  }
++
++  if (cmsNext == 0)
++    finished = true;
++  return finished;
++}
+ 
+-    // Which is shorter, the delay wait or the asked wait?
++bool PhysicalSocketServer::MultiThreadWait(int64_t cmsNext, bool process_io) {
++  auto shouldBreak = false;
+ 
+-    int64_t cmsNext;
+-    if (cmsWait == kForever) {
+-      cmsNext = cmsWait;
+-    } else {
+-      cmsNext = std::max<int64_t>(0, cmsTotal - cmsElapsed);
++  if (WaitForSingleObject(signal_wakeup_->GetWSAEvent(), 0) == WAIT_OBJECT_0) {
++    shouldBreak = true;
++  }
++
++  DWORD dw = WSAWaitForMultipleEvents(active_eventListeners_,
++                                      &_threadSignals[0], shouldBreak,
++                                      shouldBreak ? INFINITE : cmsNext, false);
++
++  if (shouldBreak) {
++    ProcessEvent(signal_wakeup_, signal_wakeup_->GetWSAEvent(), process_io);
++  } else if (dw == WSA_WAIT_FAILED) {
++    WSAGetLastError();
++    RTC_NOTREACHED();
++    shouldBreak = true;
++  } else if (dw == WSA_WAIT_TIMEOUT) {
++    WakeUp();
++  } else {
++    unsigned int index = dw - WSA_WAIT_EVENT_0;
++    if (ProcessThreadEvent(index, process_io)) {
++      _eventListeners[index]->StartIteration();
+     }
+ 
+-    // Wait for one of the events to signal
+-    DWORD dw =
+-        WSAWaitForMultipleEvents(static_cast<DWORD>(events.size()), &events[0],
+-                                 false, static_cast<DWORD>(cmsNext), false);
++    for (++index; index < active_eventListeners_;) {
++      dw = WSAWaitForMultipleEvents(
++          static_cast<DWORD>(active_eventListeners_ - index),
++          &_threadSignals[index], false, 0, false);
++      if (dw == WSA_WAIT_FAILED || dw == WSA_WAIT_TIMEOUT) {
++        break;
++      } else {
++        index += dw - WSA_WAIT_EVENT_0;
++        if (ProcessThreadEvent(index, process_io)) {
++          _eventListeners[index]->StartIteration();
++        }
++        ++index;
++      }
++    }
++  }
++  return shouldBreak;
++}
+ 
+-    if (dw == WSA_WAIT_FAILED) {
+-      // Failed?
+-      // TODO(pthatcher): need a better strategy than this!
+-      WSAGetLastError();
+-      RTC_NOTREACHED();
++bool PhysicalSocketServer::ProcessThreadEvent(unsigned int threadIndex,
++                                              bool process_io) {
++  // const auto result = eventListeners_[threadIndex]->Working();
++  const auto result = _threadDescriptors[threadIndex]->Result;
++  const auto& events = _threadDescriptors[threadIndex]->Events;
++  const auto& globalEventIndex =
++      _threadDescriptors[threadIndex]->GlobalEventIndex;
++
++  if (result != WSA_WAIT_FAILED) {
++    unsigned int index = result - WSA_WAIT_EVENT_0;
++    if (index == 0) {
+       return false;
+-    } else if (dw == WSA_WAIT_TIMEOUT) {
+-      // Timeout?
+-      return true;
+-    } else {
+-      // Figure out which one it is and call it
+-      CritScope cr(&crit_);
+-      int index = dw - WSA_WAIT_EVENT_0;
+-      if (index > 0) {
+-        --index;  // The first event is the socket event
+-        Dispatcher* disp = event_owners[index];
+-        // The dispatcher could have been removed while waiting for events.
+-        if (dispatchers_.find(disp) != dispatchers_.end()) {
+-          disp->OnPreEvent(0);
+-          disp->OnEvent(0, 0);
++    }
++    ProcessEvent(_dispatchers[globalEventIndex + index - 1], events[index],
++                 process_io);
++
++    for (++index; index < events.size();) {
++      auto dw =
++          WSAWaitForMultipleEvents(static_cast<DWORD>(events.size() - index),
++                                   &events[index], false, 0, false);
++      if (dw == WSA_WAIT_FAILED || dw == WSA_WAIT_TIMEOUT) {
++        break;
++      } else {
++        index += dw - WSA_WAIT_EVENT_0;
++        ProcessEvent(_dispatchers[globalEventIndex + index - 1], events[index],
++                     process_io);
++        ++index;
++      }
++    }
++  } else {
++    return false;
++  }
++  return true;
++}
++
++void PhysicalSocketServer::ProcessEvent(Dispatcher* disp,
++                                        WSAEVENT wsaEvent,
++                                        bool process_io) {
++  auto s = disp->GetSocket();
++  if (s == INVALID_SOCKET) {
++    // The dispatcher could have been removed while waiting for events.
++    if (dispatchers_.find(disp) != dispatchers_.end()) {
++      disp->OnPreEvent(0);
++      disp->OnEvent(0, 0);
++    }
++  } else if (process_io) {
++    WSANETWORKEVENTS wsaEvents;
++    int err = WSAEnumNetworkEvents(s, wsaEvent, &wsaEvents);
++    if (err == 0) {
++      {
++        if ((wsaEvents.lNetworkEvents & FD_READ) &&
++            wsaEvents.iErrorCode[FD_READ_BIT] != 0) {
++          RTC_LOG(WARNING) << "PhysicalSocketServer got FD_READ_BIT error "
++                           << wsaEvents.iErrorCode[FD_READ_BIT];
          }
 -      } else if (process_io) {
 -        processing_dispatchers_ = true;
@@ -50,70 +520,13 @@ index 4ad2857c00..e37e87c730 100644
 -                RTC_LOG(WARNING)
 -                    << "PhysicalSocketServer got FD_CONNECT_BIT error "
 -                    << wsaEvents.iErrorCode[FD_CONNECT_BIT];
-+      }
-+      else
-+      {
-+        if (process_io) {
-+          processing_dispatchers_ = true;
-+          for (Dispatcher* disp : dispatchers_) {
-+            SOCKET s = disp->GetSocket();
-+            if (s == INVALID_SOCKET)
-+              continue;
-+
-+            WSANETWORKEVENTS wsaEvents;
-+            int err = WSAEnumNetworkEvents(s, events[0], &wsaEvents);
-+            if (err == 0) {
-+              {
-+                if ((wsaEvents.lNetworkEvents & FD_READ) &&
-+                    wsaEvents.iErrorCode[FD_READ_BIT] != 0) {
-+                  RTC_LOG(WARNING)
-+                      << "PhysicalSocketServer got FD_READ_BIT error "
-+                      << wsaEvents.iErrorCode[FD_READ_BIT];
-+                }
-+                if ((wsaEvents.lNetworkEvents & FD_WRITE) &&
-+                    wsaEvents.iErrorCode[FD_WRITE_BIT] != 0) {
-+                  RTC_LOG(WARNING)
-+                      << "PhysicalSocketServer got FD_WRITE_BIT error "
-+                      << wsaEvents.iErrorCode[FD_WRITE_BIT];
-+                }
-+                if ((wsaEvents.lNetworkEvents & FD_CONNECT) &&
-+                    wsaEvents.iErrorCode[FD_CONNECT_BIT] != 0) {
-+                  RTC_LOG(WARNING)
-+                      << "PhysicalSocketServer got FD_CONNECT_BIT error "
-+                      << wsaEvents.iErrorCode[FD_CONNECT_BIT];
-+                }
-+                if ((wsaEvents.lNetworkEvents & FD_ACCEPT) &&
-+                    wsaEvents.iErrorCode[FD_ACCEPT_BIT] != 0) {
-+                  RTC_LOG(WARNING)
-+                      << "PhysicalSocketServer got FD_ACCEPT_BIT error "
-+                      << wsaEvents.iErrorCode[FD_ACCEPT_BIT];
-+                }
-+                if ((wsaEvents.lNetworkEvents & FD_CLOSE) &&
-+                    wsaEvents.iErrorCode[FD_CLOSE_BIT] != 0) {
-+                  RTC_LOG(WARNING)
-+                      << "PhysicalSocketServer got FD_CLOSE_BIT error "
-+                      << wsaEvents.iErrorCode[FD_CLOSE_BIT];
-+                }
-               }
+-              }
 -              if ((wsaEvents.lNetworkEvents & FD_ACCEPT) &&
 -                  wsaEvents.iErrorCode[FD_ACCEPT_BIT] != 0) {
 -                RTC_LOG(WARNING)
 -                    << "PhysicalSocketServer got FD_ACCEPT_BIT error "
 -                    << wsaEvents.iErrorCode[FD_ACCEPT_BIT];
-+              uint32_t ff = 0;
-+              int errcode = 0;
-+              if (wsaEvents.lNetworkEvents & FD_READ)
-+                ff |= DE_READ;
-+              if (wsaEvents.lNetworkEvents & FD_WRITE)
-+                ff |= DE_WRITE;
-+              if (wsaEvents.lNetworkEvents & FD_CONNECT) {
-+                if (wsaEvents.iErrorCode[FD_CONNECT_BIT] == 0) {
-+                  ff |= DE_CONNECT;
-+                } else {
-+                  ff |= DE_CLOSE;
-+                  errcode = wsaEvents.iErrorCode[FD_CONNECT_BIT];
-+                }
-               }
+-              }
 -              if ((wsaEvents.lNetworkEvents & FD_CLOSE) &&
 -                  wsaEvents.iErrorCode[FD_CLOSE_BIT] != 0) {
 -                RTC_LOG(WARNING)
@@ -131,18 +544,9 @@ index 4ad2857c00..e37e87c730 100644
 -              if (wsaEvents.iErrorCode[FD_CONNECT_BIT] == 0) {
 -                ff |= DE_CONNECT;
 -              } else {
-+              if (wsaEvents.lNetworkEvents & FD_ACCEPT)
-+                ff |= DE_ACCEPT;
-+              if (wsaEvents.lNetworkEvents & FD_CLOSE) {
-                 ff |= DE_CLOSE;
+-                ff |= DE_CLOSE;
 -                errcode = wsaEvents.iErrorCode[FD_CONNECT_BIT];
-+                errcode = wsaEvents.iErrorCode[FD_CLOSE_BIT];
-+              }
-+              if (ff != 0) {
-+                disp->OnPreEvent(ff);
-+                disp->OnEvent(ff, errcode);
-+                disp->SetSubscribeEvent(0);
-               }
+-              }
 -            }
 -            if (wsaEvents.lNetworkEvents & FD_ACCEPT)
 -              ff |= DE_ACCEPT;
@@ -153,55 +557,211 @@ index 4ad2857c00..e37e87c730 100644
 -            if (ff != 0) {
 -              disp->OnPreEvent(ff);
 -              disp->OnEvent(ff, errcode);
-             }
-           }
--        }
+-            }
+-          }
++        if ((wsaEvents.lNetworkEvents & FD_WRITE) &&
++            wsaEvents.iErrorCode[FD_WRITE_BIT] != 0) {
++          RTC_LOG(WARNING) << "PhysicalSocketServer got FD_WRITE_BIT error "
++                           << wsaEvents.iErrorCode[FD_WRITE_BIT];
+         }
 -
 -        processing_dispatchers_ = false;
 -        // Process deferred dispatchers that have been added/removed while the
 -        // events were handled above.
 -        AddRemovePendingDispatchers();
--      }
++        if ((wsaEvents.lNetworkEvents & FD_CONNECT) &&
++            wsaEvents.iErrorCode[FD_CONNECT_BIT] != 0) {
++          RTC_LOG(WARNING) << "PhysicalSocketServer got FD_CONNECT_BIT error "
++                           << wsaEvents.iErrorCode[FD_CONNECT_BIT];
++        }
++        if ((wsaEvents.lNetworkEvents & FD_ACCEPT) &&
++            wsaEvents.iErrorCode[FD_ACCEPT_BIT] != 0) {
++          RTC_LOG(WARNING) << "PhysicalSocketServer got FD_ACCEPT_BIT error "
++                           << wsaEvents.iErrorCode[FD_ACCEPT_BIT];
++        }
++        if ((wsaEvents.lNetworkEvents & FD_CLOSE) &&
++            wsaEvents.iErrorCode[FD_CLOSE_BIT] != 0) {
++          RTC_LOG(WARNING) << "PhysicalSocketServer got FD_CLOSE_BIT error "
++                           << wsaEvents.iErrorCode[FD_CLOSE_BIT];
++        }
++      }
++      uint32_t ff = 0;
++      int errcode = 0;
++      if (wsaEvents.lNetworkEvents & FD_READ)
++        ff |= DE_READ;
++      if (wsaEvents.lNetworkEvents & FD_WRITE)
++        ff |= DE_WRITE;
++      if (wsaEvents.lNetworkEvents & FD_CONNECT) {
++        if (wsaEvents.iErrorCode[FD_CONNECT_BIT] == 0) {
++          ff |= DE_CONNECT;
++        } else {
++          ff |= DE_CLOSE;
++          errcode = wsaEvents.iErrorCode[FD_CONNECT_BIT];
++        }
++      }
++      if (wsaEvents.lNetworkEvents & FD_ACCEPT)
++        ff |= DE_ACCEPT;
++      if (wsaEvents.lNetworkEvents & FD_CLOSE) {
++        ff |= DE_CLOSE;
++        errcode = wsaEvents.iErrorCode[FD_CLOSE_BIT];
+       }
++      if (ff != 0) {
++        disp->OnPreEvent(ff);
++        disp->OnEvent(ff, errcode);
++      }
++    }
++  }
++}
  
-+          processing_dispatchers_ = false;
-+          // Process deferred dispatchers that have been added/removed while the
-+          // events were handled above.
-+          AddRemovePendingDispatchers();
-+        }else
-+      {
-       // Reset the network event until new activity occurs
+-      // Reset the network event until new activity occurs
 -      WSAResetEvent(socket_ev_);
-+        WSAResetEvent(socket_ev_);
-+      }
-+      }
++void PhysicalSocketServer::RebalanceEvents() {
++  constexpr auto maxSocketPerThread = MAXIMUM_WAIT_OBJECTS;
++
++  if (socketCount_ <= maxSocketPerThread) {
++	  active_eventListeners_ = 0;
++	  return;
++  }
++
++  const auto coreCount = 1u;  // system_info_.dwNumberOfProcessors;
++  const decltype(maxSocketPerThread) validSocketCount = socketCount_;
++
++  const auto socketPerCore = validSocketCount / coreCount;
++  const auto threadCount =
++      socketPerCore > maxSocketPerThread
++          ? (validSocketCount + maxSocketPerThread - 1) / maxSocketPerThread
++          : coreCount;
++
++  const auto divrem = div(validSocketCount, threadCount);
++  const auto socketPerThread = divrem.quot;
++
++  auto socketOffset = _events.begin() + 1;
++  auto globalEventIndex = 1;
++  active_eventListeners_ = 0;
++  for (auto i = 0u; i < threadCount; ++i) {
++    const auto socketCount = i + 1 <= static_cast<unsigned int>(divrem.rem)
++                                 ? socketPerThread + 1
++                                 : socketPerThread;
++    if (i >= _eventListeners.size()) {
++      _threadDescriptors.emplace_back(std::make_shared<ThreadDescriptor>());
++      _threadSignals.push_back(_threadDescriptors[i]->SignalEvent);
++
++      _eventListeners.emplace_back(
++          std::make_unique<WsaEventListener>(_threadDescriptors[i]));
++      WaitForSingleObject(_threadSignals[i], INFINITE);
      }
  
-     // Break?
+-    // Break?
+-    if (!fWait_)
+-      break;
+-    cmsElapsed = TimeSince(msStart);
+-    if ((cmsWait != kForever) && (cmsElapsed >= cmsWait)) {
+-      break;
++    _threadDescriptors[i]->GlobalEventIndex = globalEventIndex;
++    _threadDescriptors[i]->Events.resize(socketCount + 1);
++    _threadDescriptors[i]->Events[0] = signal_wakeup_->GetWSAEvent();
++
++    if (socketCount) {
++      std::copy(socketOffset, socketOffset + socketCount,
++                _threadDescriptors[i]->Events.begin() + 1);
++      ++active_eventListeners_;
+     }
++
++    globalEventIndex += socketCount;
++    socketOffset += socketCount;
+   }
+ 
+-  // Done
+-  return true;
++  if (!active_eventListeners_) {
++    active_eventListeners_ = 1;
++  }
+ }
+ #endif  // WEBRTC_WIN
+-
+ }  // namespace rtc
 diff --git a/rtc_base/physicalsocketserver.h b/rtc_base/physicalsocketserver.h
-index ee4f936e81..b146d4adea 100644
+index ee4f936e81..8235bfba71 100644
 --- a/rtc_base/physicalsocketserver.h
 +++ b/rtc_base/physicalsocketserver.h
-@@ -58,6 +58,23 @@ class Dispatcher {
-   virtual int GetDescriptor() = 0;
-   virtual bool IsDescriptorClosed() = 0;
+@@ -18,7 +18,11 @@
+ 
+ #include <memory>
+ #include <set>
++#include <unordered_map>
++#include <unordered_set>
+ #include <vector>
++#include <atomic>
++#include <mutex>
+ 
+ #include "rtc_base/criticalsection.h"
+ #include "rtc_base/nethelpers.h"
+@@ -43,6 +47,9 @@ class Signaler;
+ #if defined(WEBRTC_POSIX)
+ class PosixSignalDispatcher;
  #endif
-+
 +#if defined(WEBRTC_WIN)
-+
-+  bool IsSubscribeToEvent(int arg)
-+  {
-+    return _flags == arg;
-+  }
-+
-+  void SetSubscribeEvent(int arg)
-+  {
-+    _flags = arg;
-+  }
-+
-+  private:
-+    int _flags;
++class WsaEventListener;
 +#endif
+ 
+ class Dispatcher {
+  public:
+@@ -119,6 +126,7 @@ class PhysicalSocketServer : public SocketServer {
+   int epoll_fd_ = INVALID_SOCKET;
+   std::vector<struct epoll_event> epoll_events_;
+ #endif  // WEBRTC_USE_EPOLL
++  // DispatcherSet
+   DispatcherSet dispatchers_;
+   DispatcherSet pending_add_dispatchers_;
+   DispatcherSet pending_remove_dispatchers_;
+@@ -127,7 +135,36 @@ class PhysicalSocketServer : public SocketServer {
+   CriticalSection crit_;
+   bool fWait_;
+ #if defined(WEBRTC_WIN)
+-  WSAEVENT socket_ev_;
++ public:
++  struct ThreadDescriptor {
++    ~ThreadDescriptor() {
++      WSACloseEvent(SignalEvent);
++      WSACloseEvent(StartEvent);
++    }
++	std::vector<WSAEVENT> Events;
++	size_t GlobalEventIndex;
++	WSAEVENT SignalEvent = WSACreateEvent();
++    std::atomic_bool Started = true;
++    DWORD Result = WSA_WAIT_FAILED;
++	WSAEVENT StartEvent = WSACreateEvent();
++  };
 +
++ private:
++  std::vector<WSAEVENT> _events;
++  std::vector<Dispatcher*> _dispatchers;
++  std::vector<std::shared_ptr<ThreadDescriptor>> _threadDescriptors;
++  std::vector<std::unique_ptr<WsaEventListener> > _eventListeners;
++  std::vector<WSAEVENT> _threadSignals;
++
++  SYSTEM_INFO system_info_;
++  DWORD active_eventListeners_ = 0;
++  unsigned int socketCount_ = 0;
++
++  bool SingleThreadWait(int64_t cmsNext, bool process_io);
++  bool MultiThreadWait(int64_t time, bool process_io);
++  bool ProcessThreadEvent(unsigned int index, bool process_io);
++  void ProcessEvent(Dispatcher* disp, WSAEVENT wsaEvent, bool process_io);
++  void RebalanceEvents();
+ #endif
  };
  
- // A socket server that provides the real sockets of the underlying OS.
+@@ -257,7 +294,8 @@ class SocketDispatcher : public Dispatcher, public PhysicalSocket {
+   static int next_id_;
+   int id_;
+   bool signal_close_;
+-  int signal_err_;
++  int signal_err_ = 0;
++  WSAEVENT hev_;
+ #endif  // WEBRTC_WIN
+ #if defined(WEBRTC_USE_EPOLL)
+   void MaybeUpdateDispatcher(uint8_t old_events);
+-- 
+2.22.0.windows.1
+
