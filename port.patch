@@ -1,0 +1,41 @@
+From 25a066f84bde5141e1083b3bad4e7f5b66ff58c5 Mon Sep 17 00:00:00 2001
+From: Igor Ulitin <iulitin@techinline.com>
+Date: Wed, 17 Jun 2020 11:23:25 +0400
+Subject: [PATCH] ComputeFoundation - global function
+
+---
+ p2p/base/port.cc | 2 +-
+ p2p/base/port.h  | 4 ++++
+ 2 files changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/p2p/base/port.cc b/p2p/base/port.cc
+index 4d93b4f92f..bb0ce2df0b 100644
+--- a/p2p/base/port.cc
++++ b/p2p/base/port.cc
+@@ -203,7 +203,7 @@ const char TCPTYPE_SIMOPEN_STR[] = "so";
+ //   then the foundation will be different.  Two candidate pairs with
+ //   the same foundation pairs are likely to have similar network
+ //   characteristics.  Foundations are used in the frozen algorithm.
+-static std::string ComputeFoundation(const std::string& type,
++std::string ComputeFoundation(const std::string& type,
+                                      const std::string& protocol,
+                                      const std::string& relay_protocol,
+                                      const rtc::SocketAddress& base_address) {
+diff --git a/p2p/base/port.h b/p2p/base/port.h
+index ca4fedbbd8..b486bb2df1 100644
+--- a/p2p/base/port.h
++++ b/p2p/base/port.h
+@@ -864,6 +864,10 @@ class ProxyConnection : public Connection {
+   int error_ = 0;
+ };
+ 
++std::string ComputeFoundation(const std::string& type,
++                                     const std::string& protocol,
++                                     const std::string& relay_protocol,
++                                     const rtc::SocketAddress& base_address);
+ }  // namespace cricket
+ 
+ #endif  // P2P_BASE_PORT_H_
+-- 
+2.22.0.windows.1
+
