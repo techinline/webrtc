@@ -36,7 +36,7 @@ index 0c2fef3112..9ebd1d58da 100644
      }
    }
    // Filter out link-local networks if needed.
-@@ -916,7 +916,30 @@ void BasicPortAllocatorSession::OnCandidateReady(Port* port,
+@@ -916,7 +916,34 @@ void BasicPortAllocatorSession::OnCandidateReady(Port* port,
      candidates.push_back(SanitizeCandidate(c));
      SignalCandidatesReady(this, candidates);
    } else {
