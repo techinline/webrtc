@@ -15,7 +15,6 @@ git.exe --work-tree %CD% apply %PATCH_DIR%/usrsctplib.patch
 cd ..\..\..\
 echo %CD%
 git.exe --work-tree %CD% apply %PATCH_DIR%/webrtc.patch
-git.exe --work-tree %CD% apply %PATCH_DIR%/webrtc-physical.patch
 
 :end
 popd
