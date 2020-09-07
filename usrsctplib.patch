@@ -448,7 +448,7 @@ index ead9e9c..b066d6f 100755
  
  #endif /* _KERNEL */
  
-+#define SCTP_CWND_SIZE 262144
++#define SCTP_CWND_SIZE 2621440
 +
  #endif /* !_NETINET_SCTP_VAR_H_ */
 diff --git a/usrsctplib/netinet/sctputil.c b/usrsctplib/netinet/sctputil.c
