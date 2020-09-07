@@ -1,13 +1,3 @@
-From 14d2dc6fedc3db59753362c560bfa4a2d3e725d2 Mon Sep 17 00:00:00 2001
-From: Igor Ulitin <iulitin@techinline.com>
-Date: Wed, 2 Sep 2020 14:03:28 +0400
-Subject: [PATCH] apply patch
-
----
- config/BUILD.gn     | 4 ++--
- config/win/BUILD.gn | 8 ++++----
- 2 files changed, 6 insertions(+), 6 deletions(-)
-
 diff --git a/config/BUILD.gn b/config/BUILD.gn
 index d0517299b..3b01e08f3 100644
 --- a/config/BUILD.gn

@@ -1,18 +1,3 @@
-From b1166d36f6b14a2c61cc3f6520922af72cf9bbe9 Mon Sep 17 00:00:00 2001
-From: Igor Ulitin <iulitin@techinline.com>
-Date: Mon, 7 Sep 2020 10:59:45 +0400
-Subject: [PATCH] patch
-
----
- usrsctplib/netinet/sctp_cc_functions.c | 118 +++++++++----------------
- usrsctplib/netinet/sctp_constants.h    |   2 +-
- usrsctplib/netinet/sctp_input.c        |  15 ++++
- usrsctplib/netinet/sctp_sysctl.h       |   8 +-
- usrsctplib/netinet/sctp_usrreq.c       |   5 +-
- usrsctplib/netinet/sctp_var.h          |   2 +
- usrsctplib/netinet/sctputil.c          |   7 ++
- 7 files changed, 71 insertions(+), 86 deletions(-)
-
 diff --git a/usrsctplib/netinet/sctp_cc_functions.c b/usrsctplib/netinet/sctp_cc_functions.c
 index 0139057..5772134 100755
 --- a/usrsctplib/netinet/sctp_cc_functions.c
