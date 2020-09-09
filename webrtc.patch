@@ -1,3 +1,91 @@
+diff --git a/p2p/client/basicportallocator.cc b/p2p/client/basicportallocator.cc
+index 0c2fef3112..9ebd1d58da 100644
+--- a/p2p/client/basicportallocator.cc
++++ b/p2p/client/basicportallocator.cc
+@@ -668,11 +668,11 @@ void BasicPortAllocatorSession::OnAllocate() {
+ std::vector<rtc::Network*> BasicPortAllocatorSession::GetNetworks() {
+   RTC_DCHECK_RUN_ON(network_thread_);
+   std::vector<rtc::Network*> networks;
+-  rtc::NetworkManager* network_manager = allocator_->network_manager();
+-  RTC_DCHECK(network_manager != nullptr);
++  _network_manager = allocator_->network_manager();
++  RTC_DCHECK(_network_manager != nullptr);
+   // If the network permission state is BLOCKED, we just act as if the flag has
+   // been passed in.
+-  if (network_manager->enumeration_permission() ==
++  if (_network_manager->enumeration_permission() ==
+       rtc::NetworkManager::ENUMERATION_BLOCKED) {
+     set_flags(flags() | PORTALLOCATOR_DISABLE_ADAPTER_ENUMERATION);
+   }
+@@ -679,15 +679,15 @@ std::vector<rtc::Network*> BasicPortAllocatorSession::GetNetworks() {
+   // traffic by OS is also used here to avoid any local or public IP leakage
+   // during stun process.
+   if (flags() & PORTALLOCATOR_DISABLE_ADAPTER_ENUMERATION) {
+-    network_manager->GetAnyAddressNetworks(&networks);
++    _network_manager->GetAnyAddressNetworks(&networks);
+   } else {
+-    network_manager->GetNetworks(&networks);
++    _network_manager->GetNetworks(&networks);
+     // If network enumeration fails, use the ANY address as a fallback, so we
+     // can at least try gathering candidates using the default route chosen by
+     // the OS. Or, if the PORTALLOCATOR_ENABLE_ANY_ADDRESS_PORTS flag is
+     // set, we'll use ANY address candidates either way.
+     if (networks.empty() || flags() & PORTALLOCATOR_ENABLE_ANY_ADDRESS_PORTS) {
+-      network_manager->GetAnyAddressNetworks(&networks);
++      _network_manager->GetAnyAddressNetworks(&networks);
+     }
+   }
+   // Filter out link-local networks if needed.
+@@ -916,7 +916,34 @@ void BasicPortAllocatorSession::OnCandidateReady(Port* port,
+     candidates.push_back(SanitizeCandidate(c));
+     SignalCandidatesReady(this, candidates);
+   } else {
+-    RTC_LOG(LS_INFO) << "Discarding candidate because it doesn't match filter.";
++    if (c.address().IsAnyIP()) {
++      std::vector<Candidate> candidates;
++
++      std::vector<rtc::Network*> networks;
++      _network_manager->GetNetworks(&networks);
++
++      for (uint32_t i = 0; i < networks.size(); ++i) {
++        Candidate tmp_c = c;
++        rtc::SocketAddress addr = c.address();
++        auto item = networks[i];
++        auto ip = item->GetBestIP();
++        addr.SetResolvedIP(ip);
++
++        const auto foundation = ComputeFoundation(c.type(), c.protocol(), c.relay_protocol(), addr);
++        tmp_c.set_foundation(foundation);
++        tmp_c.set_network_id(item->id());
++        tmp_c.set_network_name(item->name());
++        tmp_c.set_network_type(item->type());
++        tmp_c.set_address(addr);
++        candidates.push_back(SanitizeCandidate(tmp_c));
++      }
++
++      SignalCandidatesReady(this, candidates);
++    }
++    else
++    {
++      RTC_LOG(LS_INFO) << "Discarding candidate because it doesn't match filter. " << c.ToString();
++    }
+   }
+ 
+   // If we have pruned any port, maybe need to signal port allocation done.
+
+diff --git a/p2p/client/basicportallocator.h b/p2p/client/basicportallocator.h
+index 672f3ddb7c..7b9dfcda1d 100644
+--- a/p2p/client/basicportallocator.h
++++ b/p2p/client/basicportallocator.h
+@@ -270,6 +270,7 @@ class RTC_EXPORT BasicPortAllocatorSession : public PortAllocatorSession,
+   std::vector<AllocationSequence*> sequences_;
+   std::vector<PortData> ports_;
+   uint32_t candidate_filter_ = CF_ALL;
++  rtc::NetworkManager* _network_manager;
+   // Whether to prune low-priority ports, taken from the port allocator.
+   bool prune_turn_ports_;
+   SessionState state_ = SessionState::CLEARED;
+
 diff --git a/api/peerconnectioninterface.h b/api/peerconnectioninterface.h
 index 4a7b051b33..3aa891bcee 100644
 --- a/api/peerconnectioninterface.h
