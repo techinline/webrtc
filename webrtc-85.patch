@@ -1,0 +1,290 @@
+diff --git a/api/peer_connection_interface.h b/api/peer_connection_interface.h
+index 2664af4e5e..a28dd69f3a 100644
+--- a/api/peer_connection_interface.h
++++ b/api/peer_connection_interface.h
+@@ -1244,6 +1244,7 @@ class PeerConnectionObserver {
+   // The heuristics for defining what constitutes "interesting" are
+   // implementation-defined.
+   virtual void OnInterestingUsage(int usage_pattern) {}
++  virtual void OnAllConnectionDestroyed() {}
+ };
+ 
+ // PeerConnectionDependencies holds all of PeerConnections dependencies.
+diff --git a/p2p/base/ice_transport_internal.h b/p2p/base/ice_transport_internal.h
+index b735a1a742..e69bd8b58d 100644
+--- a/p2p/base/ice_transport_internal.h
++++ b/p2p/base/ice_transport_internal.h
+@@ -312,6 +312,8 @@ class RTC_EXPORT IceTransportInternal : public rtc::PacketTransportInternal {
+ 
+   // Invoked when the transport is being destroyed.
+   sigslot::signal1<IceTransportInternal*> SignalDestroyed;
++  
++  sigslot::signal<> SignalAllConectionDestroyed;
+ };
+ 
+ }  // namespace cricket
+diff --git a/p2p/base/p2p_constants.cc b/p2p/base/p2p_constants.cc
+index 3414939a6f..b8f60f9108 100644
+--- a/p2p/base/p2p_constants.cc
++++ b/p2p/base/p2p_constants.cc
+@@ -47,7 +47,7 @@ const int MIN_CHECK_RECEIVING_INTERVAL = 50;
+ const int RECEIVING_TIMEOUT = MIN_CHECK_RECEIVING_INTERVAL * 50;
+ const int RECEIVING_SWITCHING_DELAY = 1000;
+ const int BACKUP_CONNECTION_PING_INTERVAL = 25 * 1000;
+-const int REGATHER_ON_FAILED_NETWORKS_INTERVAL = 5 * 60 * 1000;
++const int REGATHER_ON_FAILED_NETWORKS_INTERVAL = 30 * 1000;
+ 
+ // When the socket is unwritable, we will use 10 Kbps (ignoring IP+UDP headers)
+ // for pinging. When the socket is writable, we will use only 1 Kbps because we
+diff --git a/p2p/base/p2p_transport_channel.cc b/p2p/base/p2p_transport_channel.cc
+index 6f0df04150..fd792a6dc6 100644
+--- a/p2p/base/p2p_transport_channel.cc
++++ b/p2p/base/p2p_transport_channel.cc
+@@ -1766,6 +1766,7 @@ void P2PTransportChannel::SwitchSelectedConnection(Connection* conn,
+         GetProtocolOverhead(selected_connection_->local_candidate().protocol());
+   } else {
+     RTC_LOG(LS_INFO) << ToString() << ": No selected connection";
++    SignalAllConectionDestroyed();
+   }
+ 
+   if (field_trials_.send_ping_on_switch_ice_controlling &&
+diff --git a/p2p/base/port_allocator.cc b/p2p/base/port_allocator.cc
+index b13896c4bc..19b7a1b5c9 100644
+--- a/p2p/base/port_allocator.cc
++++ b/p2p/base/port_allocator.cc
+@@ -205,6 +205,15 @@ bool PortAllocator::SetConfiguration(
+   return true;
+ }
+ 
++bool PortAllocator::SetConfigurationFromTitan(const ServerAddresses& stun_servers,
++	const std::vector<RelayServerConfig>& turn_servers,
++	int candidate_pool_size,
++	bool prune_turn_ports,
++	webrtc::TurnCustomizer* turn_customizer)
++{
++	return SetConfiguration(stun_servers, turn_servers, candidate_pool_size, prune_turn_ports, turn_customizer);
++}
++
+ std::unique_ptr<PortAllocatorSession> PortAllocator::CreateSession(
+     const std::string& content_name,
+     int component,
+diff --git a/p2p/base/port_allocator.h b/p2p/base/port_allocator.h
+index 4bbe56c0b5..7d30882dce 100644
+--- a/p2p/base/port_allocator.h
++++ b/p2p/base/port_allocator.h
+@@ -374,6 +374,12 @@ class RTC_EXPORT PortAllocator : public sigslot::has_slots<> {
+                         const absl::optional<int>&
+                             stun_candidate_keepalive_interval = absl::nullopt);
+ 
++  bool SetConfigurationFromTitan(const ServerAddresses& stun_servers,
++                        const std::vector<RelayServerConfig>& turn_servers,
++                        int candidate_pool_size,
++                        bool prune_turn_ports,
++                        webrtc::TurnCustomizer* turn_customizer = nullptr);
++
+   const ServerAddresses& stun_servers() const {
+     CheckRunOnValidThreadIfInitialized();
+     return stun_servers_;
+diff --git a/p2p/base/stun_port.cc b/p2p/base/stun_port.cc
+index 4e1a1f6a97..17955f114c 100644
+--- a/p2p/base/stun_port.cc
++++ b/p2p/base/stun_port.cc
+@@ -373,10 +373,6 @@ void UDPPort::OnLocalAddressReady(rtc::AsyncPacketSocket* socket,
+   // applications which absolutely requires a HOST candidate.
+   rtc::SocketAddress addr = address;
+ 
+-  // If MaybeSetDefaultLocalAddress fails, we keep the "any" IP so that at
+-  // least the port is listening.
+-  MaybeSetDefaultLocalAddress(&addr);
+-
+   AddAddress(addr, addr, rtc::SocketAddress(), UDP_PROTOCOL_NAME, "", "",
+              LOCAL_PORT_TYPE, ICE_TYPE_PREFERENCE_HOST, 0, "", false);
+   MaybePrepareStunCandidate();
+diff --git a/p2p/client/basic_port_allocator.cc b/p2p/client/basic_port_allocator.cc
+index bb640d9498..86fec2d155 100644
+--- a/p2p/client/basic_port_allocator.cc
++++ b/p2p/client/basic_port_allocator.cc
+@@ -681,11 +681,11 @@ void BasicPortAllocatorSession::OnAllocate() {
+ std::vector<rtc::Network*> BasicPortAllocatorSession::GetNetworks() {
+   RTC_DCHECK_RUN_ON(network_thread_);
+   std::vector<rtc::Network*> networks;
+-  rtc::NetworkManager* network_manager = allocator_->network_manager();
+-  RTC_DCHECK(network_manager != nullptr);
++  _network_manager = allocator_->network_manager();
++  RTC_DCHECK(_network_manager != nullptr);
+   // If the network permission state is BLOCKED, we just act as if the flag has
+   // been passed in.
+-  if (network_manager->enumeration_permission() ==
++  if (_network_manager->enumeration_permission() ==
+       rtc::NetworkManager::ENUMERATION_BLOCKED) {
+     set_flags(flags() | PORTALLOCATOR_DISABLE_ADAPTER_ENUMERATION);
+   }
+@@ -694,15 +694,15 @@ std::vector<rtc::Network*> BasicPortAllocatorSession::GetNetworks() {
+   // traffic by OS is also used here to avoid any local or public IP leakage
+   // during stun process.
+   if (flags() & PORTALLOCATOR_DISABLE_ADAPTER_ENUMERATION) {
+-    network_manager->GetAnyAddressNetworks(&networks);
++    _network_manager->GetAnyAddressNetworks(&networks);
+   } else {
+-    network_manager->GetNetworks(&networks);
++    _network_manager->GetNetworks(&networks);
+     // If network enumeration fails, use the ANY address as a fallback, so we
+     // can at least try gathering candidates using the default route chosen by
+     // the OS. Or, if the PORTALLOCATOR_ENABLE_ANY_ADDRESS_PORTS flag is
+     // set, we'll use ANY address candidates either way.
+     if (networks.empty() || flags() & PORTALLOCATOR_ENABLE_ANY_ADDRESS_PORTS) {
+-      network_manager->GetAnyAddressNetworks(&networks);
++      _network_manager->GetAnyAddressNetworks(&networks);
+     }
+   }
+   // Filter out link-local networks if needed.
+@@ -965,7 +965,34 @@ void BasicPortAllocatorSession::OnCandidateReady(Port* port,
+     candidates.push_back(allocator_->SanitizeCandidate(c));
+     SignalCandidatesReady(this, candidates);
+   } else {
+-    RTC_LOG(LS_INFO) << "Discarding candidate because it doesn't match filter.";
++    if (c.address().IsAnyIP()) {
++      std::vector<Candidate> candidates;
++
++      std::vector<rtc::Network*> networks;
++      _network_manager->GetNetworks(&networks);
++
++      for (uint32_t i = 0; i < networks.size(); ++i) {
++        Candidate tmp_c = c;
++        rtc::SocketAddress addr = c.address();
++        auto item = networks[i];
++        auto ip = item->GetBestIP();
++        addr.SetResolvedIP(ip);
++
++        const auto foundation = Port::ComputeFoundation(c.type(), c.protocol(), c.relay_protocol(), addr);
++        tmp_c.set_foundation(foundation);
++        tmp_c.set_network_id(item->id());
++        tmp_c.set_network_name(item->name());
++        tmp_c.set_network_type(item->type());
++        tmp_c.set_address(addr);
++        candidates.push_back(allocator_->SanitizeCandidate(tmp_c));
++      }
++
++      SignalCandidatesReady(this, candidates);
++    }
++    else
++    {
++      RTC_LOG(LS_INFO) << "Discarding candidate because it doesn't match filter. " << c.ToString();
++    }
+   }
+ 
+   // If we have pruned any port, maybe need to signal port allocation done.
+diff --git a/p2p/client/basic_port_allocator.h b/p2p/client/basic_port_allocator.h
+index b27016a1dc..6856a4c5b3 100644
+--- a/p2p/client/basic_port_allocator.h
++++ b/p2p/client/basic_port_allocator.h
+@@ -271,6 +271,7 @@ class RTC_EXPORT BasicPortAllocatorSession : public PortAllocatorSession,
+   std::vector<PortData> ports_;
+   std::vector<IceCandidateErrorEvent> candidate_error_events_;
+   uint32_t candidate_filter_ = CF_ALL;
++  rtc::NetworkManager* _network_manager;
+   // Policy on how to prune turn ports, taken from the port allocator.
+   webrtc::PortPrunePolicy turn_port_prune_policy_;
+   SessionState state_ = SessionState::CLEARED;
+diff --git a/pc/data_channel.cc b/pc/data_channel.cc
+index ca6b6145cb..16867d5b9c 100644
+--- a/pc/data_channel.cc
++++ b/pc/data_channel.cc
+@@ -802,6 +802,11 @@ bool DataChannel::QueueSendDataMessage(const DataBuffer& buffer) {
+     return false;
+   }
+   queued_send_data_.PushBack(std::make_unique<DataBuffer>(buffer));
++
++  // The buffer can have length zero, in which case there is no change.
++  if (observer_ && buffered_amount() > start_buffered_amount) {
++    observer_->OnBufferedAmountChange(start_buffered_amount);
++  }
+   return true;
+ }
+ 
+diff --git a/pc/jsep_transport_controller.cc b/pc/jsep_transport_controller.cc
+index dbe7435c02..fdbc4bdda5 100644
+--- a/pc/jsep_transport_controller.cc
++++ b/pc/jsep_transport_controller.cc
+@@ -437,6 +437,9 @@ JsepTransportController::CreateDtlsTransport(
+     cricket::IceTransportInternal* ice) {
+   RTC_DCHECK(network_thread_->IsCurrent());
+ 
++ice->SignalAllConectionDestroyed.connect(
++		this, &JsepTransportController::OnSignalAllConectionDestroyed);
++
+   std::unique_ptr<cricket::DtlsTransportInternal> dtls;
+ 
+   if (config_.dtls_transport_factory) {
+@@ -1421,4 +1424,11 @@ void JsepTransportController::OnDtlsHandshakeError(
+   SignalDtlsHandshakeError(error);
+ }
+ 
++void JsepTransportController::OnSignalAllConectionDestroyed() {
++
++  invoker_.AsyncInvoke<void>(RTC_FROM_HERE, signaling_thread_,
++                               [this] {
++                                 SignalAllConectionDestroyed();
++                               });
++}
+ }  // namespace webrtc
+diff --git a/pc/jsep_transport_controller.h b/pc/jsep_transport_controller.h
+index 250501fd05..80b6322991 100644
+--- a/pc/jsep_transport_controller.h
++++ b/pc/jsep_transport_controller.h
+@@ -223,6 +223,8 @@ class JsepTransportController : public sigslot::has_slots<> {
+       SignalIceCandidatePairChanged;
+ 
+   sigslot::signal1<rtc::SSLHandshakeError> SignalDtlsHandshakeError;
++  
++  sigslot::signal<> SignalAllConectionDestroyed;
+ 
+  private:
+   RTCError ApplyDescription_n(bool local,
+@@ -396,6 +398,8 @@ class JsepTransportController : public sigslot::has_slots<> {
+   rtc::AsyncInvoker invoker_;
+ 
+   RTC_DISALLOW_COPY_AND_ASSIGN(JsepTransportController);
++
++  void OnSignalAllConectionDestroyed();
+ };
+ 
+ }  // namespace webrtc
+diff --git a/pc/peer_connection.cc b/pc/peer_connection.cc
+index 3def31a441..da12fc0d41 100644
+--- a/pc/peer_connection.cc
++++ b/pc/peer_connection.cc
+@@ -1299,6 +1299,8 @@ bool PeerConnection::Initialize(
+       this, &PeerConnection::OnTransportControllerDtlsHandshakeError);
+   transport_controller_->SignalIceCandidatePairChanged.connect(
+       this, &PeerConnection::OnTransportControllerCandidateChanged);
++  transport_controller_->SignalAllConectionDestroyed.connect(
++      this, &PeerConnection::OnSignalAllConectionDestroyed);
+ 
+   stats_.reset(new StatsCollector(this));
+   stats_collector_ = RTCStatsCollector::Create(this);
+@@ -7498,4 +7500,8 @@ RTCError PeerConnection::Rollback(SdpType sdp_type) {
+   return RTCError::OK();
+ }
+ 
++void PeerConnection::OnSignalAllConectionDestroyed() {
++  Observer()->OnAllConnectionDestroyed();
++}
++
+ }  // namespace webrtc
+diff --git a/pc/peer_connection.h b/pc/peer_connection.h
+index a91dc9c042..4bc53bc04e 100644
+--- a/pc/peer_connection.h
++++ b/pc/peer_connection.h
+@@ -1321,6 +1321,8 @@ class PeerConnection : public PeerConnectionInternal,
+   DataChannelController data_channel_controller_;
+   rtc::WeakPtrFactory<PeerConnection> weak_ptr_factory_
+       RTC_GUARDED_BY(signaling_thread());
++	  
++  void OnSignalAllConectionDestroyed();
+ };
+ 
+ }  // namespace webrtc
+-- 
+2.22.0.windows.1
+
