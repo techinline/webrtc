@@ -738,7 +738,7 @@ index 0c2fef3112..748384e13f 100644
 +      for (uint32_t i = 0; i < networks.size(); ++i) {
 +        Candidate tmp_c = c;
 +        rtc::SocketAddress addr = c.address();
-+        auto item = networks[i];
++        rtc::Network* item = networks[i];
 +        auto ip = item->GetBestIP();
 +        addr.SetResolvedIP(ip);
 +
