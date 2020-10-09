@@ -8,10 +8,7 @@ pushd %WEBRTC%\src\
 cd build
 echo %CD%
 git.exe --work-tree %WEBRTC%\src\build apply %PATCH_DIR%/build.patch
-cd ..\third_party\usrsctp\usrsctplib\
-echo %CD%
-git.exe --work-tree %CD% apply %PATCH_DIR%/usrsctplib.patch
-cd ..\..\..\
+cd ..\
 echo %CD%
 git.exe --work-tree %CD% apply %PATCH_DIR%/webrtc.patch
 

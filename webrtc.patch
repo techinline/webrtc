@@ -1,33 +1,321 @@
-diff --git a/api/peer_connection_interface.h b/api/peer_connection_interface.h
-index 2664af4e5e..a28dd69f3a 100644
---- a/api/peer_connection_interface.h
-+++ b/api/peer_connection_interface.h
-@@ -1244,6 +1244,7 @@ class PeerConnectionObserver {
+diff --git a/api/datachannelinterface.h b/api/datachannelinterface.h
+index 7cb5582233..628626a344 100644
+--- a/api/datachannelinterface.h
++++ b/api/datachannelinterface.h
+@@ -88,6 +88,7 @@ class DataChannelObserver {
+   virtual void OnMessage(const DataBuffer& buffer) = 0;
+   // The data channel's buffered_amount has changed.
+   virtual void OnBufferedAmountChange(uint64_t previous_amount) {}
++  virtual void OnChannelReadyToWrite() {}
+ 
+  protected:
+   virtual ~DataChannelObserver() = default;
+diff --git a/api/peerconnectioninterface.h b/api/peerconnectioninterface.h
+index 4a7b051b33..3aa891bcee 100644
+--- a/api/peerconnectioninterface.h
++++ b/api/peerconnectioninterface.h
+@@ -1176,6 +1176,8 @@ class PeerConnectionObserver {
    // The heuristics for defining what constitutes "interesting" are
    // implementation-defined.
    virtual void OnInterestingUsage(int usage_pattern) {}
++
 +  virtual void OnAllConnectionDestroyed() {}
  };
  
  // PeerConnectionDependencies holds all of PeerConnections dependencies.
-diff --git a/p2p/base/ice_transport_internal.h b/p2p/base/ice_transport_internal.h
-index b735a1a742..e69bd8b58d 100644
---- a/p2p/base/ice_transport_internal.h
-+++ b/p2p/base/ice_transport_internal.h
-@@ -312,6 +312,8 @@ class RTC_EXPORT IceTransportInternal : public rtc::PacketTransportInternal {
+diff --git a/media/sctp/sctptransport.cc b/media/sctp/sctptransport.cc
+index 4ffaaf7f5a..aab43b73ac 100644
+--- a/media/sctp/sctptransport.cc
++++ b/media/sctp/sctptransport.cc
+@@ -41,6 +41,11 @@ enum PreservedErrno {
+ #include "rtc_base/trace_event.h"
+ #include "usrsctplib/usrsctp.h"
  
-   // Invoked when the transport is being destroyed.
-   sigslot::signal1<IceTransportInternal*> SignalDestroyed;
-+  
-+  sigslot::signal<> SignalAllConectionDestroyed;
++#include <fstream>
++#include <chrono>
++
++#define MAX_BUFFER_SIZE 256 * 1024 * 3
++
+ namespace {
+ 
+ // The biggest SCTP packet. Starting from a 'safe' wire MTU value of 1280,
+@@ -176,6 +181,8 @@ class SctpTransport::UsrSctpWrapper {
+     // AF_CONN use of sctp.
+     usrsctp_init(0, &UsrSctpWrapper::OnSctpOutboundPacket, &DebugSctpPrintf);
+ 
++	usrsctp_sysctl_set_sctp_max_burst_default(0);
++
+     // To turn on/off detailed SCTP debugging. You will also need to have the
+     // SCTP_DEBUG cpp defines flag.
+     // usrsctp_sysctl_set_sctp_debug_on(SCTP_DEBUG_ALL);
+@@ -375,7 +382,7 @@ class SctpTransport::UsrSctpWrapper {
+           << sock;
+       return 0;
+     }
+-    transport->OnSendThresholdCallback();
++    transport->OnSendThresholdCallback(sb_free);
+     return 0;
+   }
  };
+@@ -384,11 +391,15 @@ SctpTransport::SctpTransport(rtc::Thread* network_thread,
+                              rtc::PacketTransportInternal* transport)
+     : network_thread_(network_thread),
+       transport_(transport),
+-      was_ever_writable_(transport->writable()) {
++      was_ever_writable_(transport->writable())
++{
+   RTC_DCHECK(network_thread_);
+   RTC_DCHECK(transport_);
+   RTC_DCHECK_RUN_ON(network_thread_);
+   ConnectTransportSignals();
++  
++  _lastMessageSize = MAX_BUFFER_SIZE;
++  _checkChannelReadyToWrite = false;
+ }
  
- }  // namespace cricket
-diff --git a/p2p/base/p2p_constants.cc b/p2p/base/p2p_constants.cc
-index 3414939a6f..b8f60f9108 100644
---- a/p2p/base/p2p_constants.cc
-+++ b/p2p/base/p2p_constants.cc
-@@ -47,7 +47,7 @@ const int MIN_CHECK_RECEIVING_INTERVAL = 50;
+ SctpTransport::~SctpTransport() {
+@@ -539,10 +550,14 @@ bool SctpTransport::SendData(const SendDataParams& params,
+     }
+   }
+ 
++  _lastMessageSize = payload.size();
++  _checkChannelReadyToWrite = true;
++
+   // We don't fragment.
+   send_res = usrsctp_sendv(
+       sock_, payload.data(), static_cast<size_t>(payload.size()), NULL, 0, &spa,
+       rtc::checked_cast<socklen_t>(sizeof(spa)), SCTP_SENDV_SPA, 0);
++	
+   if (send_res < 0) {
+     if (errno == SCTP_EWOULDBLOCK) {
+       *result = SDR_BLOCK;
+@@ -660,7 +675,9 @@ bool SctpTransport::OpenSctpSocket() {
+   // If kSendBufferSize isn't reflective of reality, we log an error, but we
+   // still have to do something reasonable here.  Look up what the buffer's
+   // real size is and set our threshold to something reasonable.
+-  static const int kSendThreshold = usrsctp_sysctl_get_sctp_sendspace() / 2;
++  // static const int kSendThreshold = usrsctp_sysctl_get_sctp_sendspace() / 2;
++
++  static const int kSendThreshold = 0;
+ 
+   sock_ = usrsctp_socket(
+       AF_CONN, SOCK_STREAM, IPPROTO_SCTP, &UsrSctpWrapper::OnSctpInboundPacket,
+@@ -708,6 +725,22 @@ bool SctpTransport::ConfigureSctpSocket() {
+     return false;
+   }
+ 
++  uint32_t sctp_buffer_size = MAX_BUFFER_SIZE;
++
++  if (usrsctp_setsockopt(sock_, SOL_SOCKET, SO_RCVBUF, (const void*)&sctp_buffer_size, sizeof(sctp_buffer_size)))
++  {
++	  RTC_LOG_ERRNO(LS_ERROR) << debug_name_ << "->ConfigureSctpSocket(): "
++                            << "Failed to set SO_LINGER SO_RCVBUF";
++      return false;
++  }
++  
++  if (usrsctp_setsockopt(sock_, SOL_SOCKET, SO_SNDBUF, (const void*)&sctp_buffer_size, sizeof(sctp_buffer_size)))
++  {
++	  RTC_LOG_ERRNO(LS_ERROR) << debug_name_ << "->ConfigureSctpSocket(): "
++                            << "Failed to set SO_LINGER SO_SNDBUF";
++      return false;
++  }
++
+   // Enable stream ID resets.
+   struct sctp_assoc_value stream_rst;
+   stream_rst.assoc_id = SCTP_ALL_ASSOC;
+@@ -887,9 +920,20 @@ void SctpTransport::OnPacketRead(rtc::PacketTransportInternal* transport,
+   }
+ }
+ 
+-void SctpTransport::OnSendThresholdCallback() {
++void SctpTransport::OnSendThresholdCallback(uint32_t sb_free) {
+   RTC_DCHECK_RUN_ON(network_thread_);
+   SetReadyToSendData();
++    
++  if (_checkChannelReadyToWrite && MAX_BUFFER_SIZE - sb_free < _lastMessageSize)
++  {
++	  _checkChannelReadyToWrite = false;
++	  OnChannelReadyToWrite();
++  }
++}
++
++void SctpTransport::OnChannelReadyToWrite() {
++  RTC_DCHECK_RUN_ON(network_thread_);
++  SignalChannelReadyToWrite();
+ }
+ 
+ sockaddr_conn SctpTransport::GetSctpSockAddr(int port) {
+diff --git a/media/sctp/sctptransport.h b/media/sctp/sctptransport.h
+index 5c2a750e4f..d079cc9337 100644
+--- a/media/sctp/sctptransport.h
++++ b/media/sctp/sctptransport.h
+@@ -107,7 +107,7 @@ class SctpTransport : public SctpTransportInternal,
+ 
+   // Sets the "ready to send" flag and fires signal if needed.
+   void SetReadyToSendData();
+-
++  
+   // Callbacks from DTLS channel.
+   void OnWritableState(rtc::PacketTransportInternal* transport);
+   virtual void OnPacketRead(rtc::PacketTransportInternal* transport,
+@@ -117,7 +117,9 @@ class SctpTransport : public SctpTransportInternal,
+                             int flags);
+ 
+   // Methods related to usrsctp callbacks.
+-  void OnSendThresholdCallback();
++  void OnSendThresholdCallback(uint32_t sb_free);
++  void OnChannelReadyToWrite();
++  
+   sockaddr_conn GetSctpSockAddr(int port);
+ 
+   // Called using |invoker_| to send packet on the network.
+@@ -160,6 +162,9 @@ class SctpTransport : public SctpTransportInternal,
+   // congestion control)? Different than |transport_|'s "ready to send".
+   bool ready_to_send_data_ = false;
+ 
++  uint32_t _lastMessageSize;
++  bool _checkChannelReadyToWrite;
++
+   // Used to keep track of the status of each stream (or rather, each pair of
+   // incoming/outgoing streams with matching IDs). It's specifically used to
+   // keep track of the status of resets, but more information could be put here
+diff --git a/media/sctp/sctptransportinternal.h b/media/sctp/sctptransportinternal.h
+index 4c3b542a52..374f3206b4 100644
+--- a/media/sctp/sctptransportinternal.h
++++ b/media/sctp/sctptransportinternal.h
+@@ -107,6 +107,8 @@ class SctpTransportInternal {
+   virtual bool ReadyToSendData() = 0;
+ 
+   sigslot::signal0<> SignalReadyToSendData;
++  
++  sigslot::signal0<> SignalChannelReadyToWrite;
+   // ReceiveDataParams includes SID, seq num, timestamp, etc. CopyOnWriteBuffer
+   // contains message payload.
+   sigslot::signal2<const ReceiveDataParams&, const rtc::CopyOnWriteBuffer&>
+diff --git a/p2p/base/basicpacketsocketfactory.cc b/p2p/base/basicpacketsocketfactory.cc
+index 8205442d5d..894dce0a0e 100644
+--- a/p2p/base/basicpacketsocketfactory.cc
++++ b/p2p/base/basicpacketsocketfactory.cc
+@@ -42,13 +42,21 @@ BasicPacketSocketFactory::~BasicPacketSocketFactory() {}
+ AsyncPacketSocket* BasicPacketSocketFactory::CreateUdpSocket(
+     const SocketAddress& address,
+     uint16_t min_port,
+-    uint16_t max_port) {
++    uint16_t max_port,
++	uint32_t socket_buffer_size) {
+   // UDP sockets are simple.
+   AsyncSocket* socket =
+       socket_factory()->CreateAsyncSocket(address.family(), SOCK_DGRAM);
+   if (!socket) {
+     return NULL;
+   }
++  
++  if (socket_buffer_size > 0)
++  {
++	socket->SetOption(Socket::OPT_RCVBUF, socket_buffer_size);
++	socket->SetOption(Socket::OPT_SNDBUF, socket_buffer_size);
++  }
++  
+   if (BindSocket(socket, address, min_port, max_port) < 0) {
+     RTC_LOG(LS_ERROR) << "UDP bind failed with error " << socket->GetError();
+     delete socket;
+@@ -61,7 +69,8 @@ AsyncPacketSocket* BasicPacketSocketFactory::CreateServerTcpSocket(
+     const SocketAddress& local_address,
+     uint16_t min_port,
+     uint16_t max_port,
+-    int opts) {
++    int opts,
++	uint32_t socket_buffer_size) {
+   // Fail if TLS is required.
+   if (opts & PacketSocketFactory::OPT_TLS) {
+     RTC_LOG(LS_ERROR) << "TLS support currently is not available.";
+@@ -74,6 +83,12 @@ AsyncPacketSocket* BasicPacketSocketFactory::CreateServerTcpSocket(
+     return NULL;
+   }
+ 
++  if (socket_buffer_size > 0)
++  {
++	socket->SetOption(Socket::OPT_RCVBUF, socket_buffer_size);
++	socket->SetOption(Socket::OPT_SNDBUF, socket_buffer_size);
++  }
++
+   if (BindSocket(socket, local_address, min_port, max_port) < 0) {
+     RTC_LOG(LS_ERROR) << "TCP bind failed with error " << socket->GetError();
+     delete socket;
+@@ -101,11 +116,12 @@ AsyncPacketSocket* BasicPacketSocketFactory::CreateClientTcpSocket(
+     const SocketAddress& remote_address,
+     const ProxyInfo& proxy_info,
+     const std::string& user_agent,
+-    int opts) {
++    int opts,
++	uint32_t socket_buffer_size) {
+   PacketSocketTcpOptions tcp_options;
+   tcp_options.opts = opts;
+   return CreateClientTcpSocket(local_address, remote_address, proxy_info,
+-                               user_agent, tcp_options);
++                               user_agent, tcp_options, socket_buffer_size);
+ }
+ 
+ AsyncPacketSocket* BasicPacketSocketFactory::CreateClientTcpSocket(
+@@ -113,13 +129,20 @@ AsyncPacketSocket* BasicPacketSocketFactory::CreateClientTcpSocket(
+     const SocketAddress& remote_address,
+     const ProxyInfo& proxy_info,
+     const std::string& user_agent,
+-    const PacketSocketTcpOptions& tcp_options) {
++    const PacketSocketTcpOptions& tcp_options,
++	uint32_t socket_buffer_size) {
+   AsyncSocket* socket =
+       socket_factory()->CreateAsyncSocket(local_address.family(), SOCK_STREAM);
+   if (!socket) {
+     return NULL;
+   }
+ 
++  if (socket_buffer_size > 0)
++  {
++	socket->SetOption(Socket::OPT_RCVBUF, socket_buffer_size);
++	socket->SetOption(Socket::OPT_SNDBUF, socket_buffer_size);
++  }
++
+   if (BindSocket(socket, local_address, 0, 0) < 0) {
+     // Allow BindSocket to fail if we're binding to the ANY address, since this
+     // is mostly redundant in the first place. The socket will be bound when we
+diff --git a/p2p/base/basicpacketsocketfactory.h b/p2p/base/basicpacketsocketfactory.h
+index 29f82db13d..2e1bfb61cc 100644
+--- a/p2p/base/basicpacketsocketfactory.h
++++ b/p2p/base/basicpacketsocketfactory.h
+@@ -30,22 +30,23 @@ class BasicPacketSocketFactory : public PacketSocketFactory {
+ 
+   AsyncPacketSocket* CreateUdpSocket(const SocketAddress& local_address,
+                                      uint16_t min_port,
+-                                     uint16_t max_port) override;
++                                     uint16_t max_port,
++									 uint32_t socket_buffer_size = 0) override;
+   AsyncPacketSocket* CreateServerTcpSocket(const SocketAddress& local_address,
+                                            uint16_t min_port,
+                                            uint16_t max_port,
+-                                           int opts) override;
++                                           int opts, uint32_t socket_buffer_size = 0) override;
+   AsyncPacketSocket* CreateClientTcpSocket(const SocketAddress& local_address,
+                                            const SocketAddress& remote_address,
+                                            const ProxyInfo& proxy_info,
+                                            const std::string& user_agent,
+-                                           int opts) override;
++                                           int opts, uint32_t socket_buffer_size = 0) override;
+   AsyncPacketSocket* CreateClientTcpSocket(
+       const SocketAddress& local_address,
+       const SocketAddress& remote_address,
+       const ProxyInfo& proxy_info,
+       const std::string& user_agent,
+-      const PacketSocketTcpOptions& tcp_options) override;
++      const PacketSocketTcpOptions& tcp_options, uint32_t socket_buffer_size = 0) override;
+ 
+   AsyncResolverInterface* CreateAsyncResolver() override;
+ 
+diff --git a/p2p/base/p2pconstants.cc b/p2p/base/p2pconstants.cc
+index 41d02dd968..d885419af4 100644
+--- a/p2p/base/p2pconstants.cc
++++ b/p2p/base/p2pconstants.cc
+@@ -45,7 +45,7 @@ const int MIN_CHECK_RECEIVING_INTERVAL = 50;
  const int RECEIVING_TIMEOUT = MIN_CHECK_RECEIVING_INTERVAL * 50;
  const int RECEIVING_SWITCHING_DELAY = 1000;
  const int BACKUP_CONNECTION_PING_INTERVAL = 25 * 1000;
@@ -36,23 +324,118 @@ index 3414939a6f..b8f60f9108 100644
  
  // When the socket is unwritable, we will use 10 Kbps (ignoring IP+UDP headers)
  // for pinging. When the socket is writable, we will use only 1 Kbps because we
-diff --git a/p2p/base/p2p_transport_channel.cc b/p2p/base/p2p_transport_channel.cc
-index 6f0df04150..fd792a6dc6 100644
---- a/p2p/base/p2p_transport_channel.cc
-+++ b/p2p/base/p2p_transport_channel.cc
-@@ -1766,6 +1766,7 @@ void P2PTransportChannel::SwitchSelectedConnection(Connection* conn,
-         GetProtocolOverhead(selected_connection_->local_candidate().protocol());
+diff --git a/p2p/base/p2ptransportchannel.cc b/p2p/base/p2ptransportchannel.cc
+index 0d21613ba4..705b6702cd 100644
+--- a/p2p/base/p2ptransportchannel.cc
++++ b/p2p/base/p2ptransportchannel.cc
+@@ -1855,6 +1855,7 @@ void P2PTransportChannel::SwitchSelectedConnection(Connection* conn) {
    } else {
-     RTC_LOG(LS_INFO) << ToString() << ": No selected connection";
+     RTC_LOG(LS_INFO) << ToString()
+                      << ": No selected connection";
 +    SignalAllConectionDestroyed();
    }
  
-   if (field_trials_.send_ping_on_switch_ice_controlling &&
-diff --git a/p2p/base/port_allocator.cc b/p2p/base/port_allocator.cc
-index b13896c4bc..19b7a1b5c9 100644
---- a/p2p/base/port_allocator.cc
-+++ b/p2p/base/port_allocator.cc
-@@ -205,6 +205,15 @@ bool PortAllocator::SetConfiguration(
+   SignalNetworkRouteChanged(network_route_);
+diff --git a/p2p/base/p2ptransportchannel.h b/p2p/base/p2ptransportchannel.h
+index abedd0bdd3..af60c536e7 100644
+--- a/p2p/base/p2ptransportchannel.h
++++ b/p2p/base/p2ptransportchannel.h
+@@ -183,6 +183,8 @@ class RTC_EXPORT P2PTransportChannel : public IceTransportInternal {
+     return ss.Release();
+   }
+ 
++  sigslot::signal<> SignalAllConectionDestroyed;
++
+  private:
+   rtc::Thread* thread() const { return network_thread_; }
+ 
+diff --git a/p2p/base/packetsocketfactory.cc b/p2p/base/packetsocketfactory.cc
+index d2f4c96c52..6f811f48dc 100644
+--- a/p2p/base/packetsocketfactory.cc
++++ b/p2p/base/packetsocketfactory.cc
+@@ -23,9 +23,9 @@ AsyncPacketSocket* PacketSocketFactory::CreateClientTcpSocket(
+     const SocketAddress& remote_address,
+     const ProxyInfo& proxy_info,
+     const std::string& user_agent,
+-    const PacketSocketTcpOptions& tcp_options) {
++    const PacketSocketTcpOptions& tcp_options, uint32_t socket_buffer_size) {
+   return CreateClientTcpSocket(local_address, remote_address, proxy_info,
+-                               user_agent, tcp_options.opts);
++                               user_agent, tcp_options.opts, socket_buffer_size);
+ }
+ 
+ }  // namespace rtc
+diff --git a/p2p/base/packetsocketfactory.h b/p2p/base/packetsocketfactory.h
+index c903df06c8..04ec925114 100644
+--- a/p2p/base/packetsocketfactory.h
++++ b/p2p/base/packetsocketfactory.h
+@@ -56,12 +56,13 @@ class RTC_EXPORT PacketSocketFactory {
+ 
+   virtual AsyncPacketSocket* CreateUdpSocket(const SocketAddress& address,
+                                              uint16_t min_port,
+-                                             uint16_t max_port) = 0;
++                                             uint16_t max_port,
++											 uint32_t socket_buffer_size = 0) = 0;
+   virtual AsyncPacketSocket* CreateServerTcpSocket(
+       const SocketAddress& local_address,
+       uint16_t min_port,
+       uint16_t max_port,
+-      int opts) = 0;
++      int opts, uint32_t socket_buffer_size = 0) = 0;
+ 
+   // TODO(deadbeef): |proxy_info| and |user_agent| should be set
+   // per-factory and not when socket is created.
+@@ -70,7 +71,7 @@ class RTC_EXPORT PacketSocketFactory {
+       const SocketAddress& remote_address,
+       const ProxyInfo& proxy_info,
+       const std::string& user_agent,
+-      int opts) = 0;
++      int opts, uint32_t socket_buffer_size = 0) = 0;
+ 
+   // TODO(deadbeef): |proxy_info|, |user_agent| and |tcp_options| should
+   // be set per-factory and not when socket is created.
+@@ -81,7 +82,7 @@ class RTC_EXPORT PacketSocketFactory {
+       const SocketAddress& remote_address,
+       const ProxyInfo& proxy_info,
+       const std::string& user_agent,
+-      const PacketSocketTcpOptions& tcp_options);
++      const PacketSocketTcpOptions& tcp_options, uint32_t socket_buffer_size = 0);
+ 
+   virtual AsyncResolverInterface* CreateAsyncResolver() = 0;
+ 
+diff --git a/p2p/base/port.cc b/p2p/base/port.cc
+index 4d93b4f92f..bb0ce2df0b 100644
+--- a/p2p/base/port.cc
++++ b/p2p/base/port.cc
+@@ -203,7 +203,7 @@ const char TCPTYPE_SIMOPEN_STR[] = "so";
+ //   then the foundation will be different.  Two candidate pairs with
+ //   the same foundation pairs are likely to have similar network
+ //   characteristics.  Foundations are used in the frozen algorithm.
+-static std::string ComputeFoundation(const std::string& type,
++std::string ComputeFoundation(const std::string& type,
+                                      const std::string& protocol,
+                                      const std::string& relay_protocol,
+                                      const rtc::SocketAddress& base_address) {
+diff --git a/p2p/base/port.h b/p2p/base/port.h
+index ca4fedbbd8..b486bb2df1 100644
+--- a/p2p/base/port.h
++++ b/p2p/base/port.h
+@@ -864,6 +864,10 @@ class ProxyConnection : public Connection {
+   int error_ = 0;
+ };
+ 
++std::string ComputeFoundation(const std::string& type,
++                                     const std::string& protocol,
++                                     const std::string& relay_protocol,
++                                     const rtc::SocketAddress& base_address);
+ }  // namespace cricket
+ 
+ #endif  // P2P_BASE_PORT_H_
+diff --git a/p2p/base/portallocator.cc b/p2p/base/portallocator.cc
+index 023e90be62..5a776fd5fb 100644
+--- a/p2p/base/portallocator.cc
++++ b/p2p/base/portallocator.cc
+@@ -203,6 +203,15 @@ bool PortAllocator::SetConfiguration(
    return true;
  }
  
@@ -68,11 +451,11 @@ index b13896c4bc..19b7a1b5c9 100644
  std::unique_ptr<PortAllocatorSession> PortAllocator::CreateSession(
      const std::string& content_name,
      int component,
-diff --git a/p2p/base/port_allocator.h b/p2p/base/port_allocator.h
-index 4bbe56c0b5..7d30882dce 100644
---- a/p2p/base/port_allocator.h
-+++ b/p2p/base/port_allocator.h
-@@ -374,6 +374,12 @@ class RTC_EXPORT PortAllocator : public sigslot::has_slots<> {
+diff --git a/p2p/base/portallocator.h b/p2p/base/portallocator.h
+index 7026f2b2b6..410723f2c6 100644
+--- a/p2p/base/portallocator.h
++++ b/p2p/base/portallocator.h
+@@ -365,6 +365,12 @@ class RTC_EXPORT PortAllocator : public sigslot::has_slots<> {
                          const absl::optional<int>&
                              stun_candidate_keepalive_interval = absl::nullopt);
  
@@ -85,11 +468,11 @@ index 4bbe56c0b5..7d30882dce 100644
    const ServerAddresses& stun_servers() const {
      CheckRunOnValidThreadIfInitialized();
      return stun_servers_;
-diff --git a/p2p/base/stun_port.cc b/p2p/base/stun_port.cc
-index 4e1a1f6a97..17955f114c 100644
---- a/p2p/base/stun_port.cc
-+++ b/p2p/base/stun_port.cc
-@@ -373,10 +373,6 @@ void UDPPort::OnLocalAddressReady(rtc::AsyncPacketSocket* socket,
+diff --git a/p2p/base/stunport.cc b/p2p/base/stunport.cc
+index 727312329e..e59471e7dd 100644
+--- a/p2p/base/stunport.cc
++++ b/p2p/base/stunport.cc
+@@ -349,10 +349,6 @@ void UDPPort::OnLocalAddressReady(rtc::AsyncPacketSocket* socket,
    // applications which absolutely requires a HOST candidate.
    rtc::SocketAddress addr = address;
  
@@ -100,11 +483,205 @@ index 4e1a1f6a97..17955f114c 100644
    AddAddress(addr, addr, rtc::SocketAddress(), UDP_PROTOCOL_NAME, "", "",
               LOCAL_PORT_TYPE, ICE_TYPE_PREFERENCE_HOST, 0, "", false);
    MaybePrepareStunCandidate();
-diff --git a/p2p/client/basic_port_allocator.cc b/p2p/client/basic_port_allocator.cc
-index bb640d9498..86fec2d155 100644
---- a/p2p/client/basic_port_allocator.cc
-+++ b/p2p/client/basic_port_allocator.cc
-@@ -681,11 +681,11 @@ void BasicPortAllocatorSession::OnAllocate() {
+diff --git a/p2p/base/tcpport.cc b/p2p/base/tcpport.cc
+index 490db1ac00..3b60edc45d 100644
+--- a/p2p/base/tcpport.cc
++++ b/p2p/base/tcpport.cc
+@@ -88,7 +88,8 @@ TCPPort::TCPPort(rtc::Thread* thread,
+                  uint16_t max_port,
+                  const std::string& username,
+                  const std::string& password,
+-                 bool allow_listen)
++                 bool allow_listen,
++				 uint32_t socket_buffer_size)
+     : Port(thread,
+            LOCAL_PORT_TYPE,
+            factory,
+@@ -100,7 +101,8 @@ TCPPort::TCPPort(rtc::Thread* thread,
+       incoming_only_(false),
+       allow_listen_(allow_listen),
+       socket_(NULL),
+-      error_(0) {
++      error_(0),
++	  socket_buffer_size_(socket_buffer_size)	  {
+   // TODO(mallinath) - Set preference value as per RFC 6544.
+   // http://b/issue?id=7141794
+   if (allow_listen_) {
+@@ -153,11 +155,11 @@ Connection* TCPPort::CreateConnection(const Candidate& address,
+     // so we need to hand off the "read packet" responsibility to
+     // TCPConnection.
+     socket->SignalReadPacket.disconnect(this);
+-    conn = new TCPConnection(this, address, socket);
++    conn = new TCPConnection(this, address, socket, socket_buffer_size_);
+   } else {
+     // Outgoing connection, which will create a new socket for which we still
+     // need to connect SignalReadyToSend and SignalSentPacket.
+-    conn = new TCPConnection(this, address);
++    conn = new TCPConnection(this, address, 0, socket_buffer_size_);
+     if (conn->socket()) {
+       conn->socket()->SignalReadyToSend.connect(this, &TCPPort::OnReadyToSend);
+       conn->socket()->SignalSentPacket.connect(this, &TCPPort::OnSentPacket);
+@@ -285,7 +287,7 @@ void TCPPort::OnNewConnection(rtc::AsyncPacketSocket* socket,
+ void TCPPort::TryCreateServerSocket() {
+   socket_ = socket_factory()->CreateServerTcpSocket(
+       rtc::SocketAddress(Network()->GetBestIP(), 0), min_port(), max_port(),
+-      false /* ssl */);
++      false /* ssl */, socket_buffer_size_);
+   if (!socket_) {
+     RTC_LOG(LS_WARNING)
+         << ToString()
+@@ -341,14 +343,16 @@ void TCPPort::OnAddressReady(rtc::AsyncPacketSocket* socket,
+ // we decide it is also applicable here.
+ TCPConnection::TCPConnection(TCPPort* port,
+                              const Candidate& candidate,
+-                             rtc::AsyncPacketSocket* socket)
++                             rtc::AsyncPacketSocket* socket,
++							 uint32_t socket_buffer_size)
+     : Connection(port, 0, candidate),
+       socket_(socket),
+       error_(0),
+       outgoing_(socket == NULL),
+       connection_pending_(false),
+       pretending_to_be_writable_(false),
+-      reconnection_timeout_(cricket::CONNECTION_WRITE_CONNECT_TIMEOUT) {
++      reconnection_timeout_(cricket::CONNECTION_WRITE_CONNECT_TIMEOUT),
++      socket_buffer_size_(socket_buffer_size)	  {
+   if (outgoing_) {
+     CreateOutgoingTcpSocket();
+   } else {
+@@ -562,7 +566,7 @@ void TCPConnection::CreateOutgoingTcpSocket() {
+   socket_.reset(port()->socket_factory()->CreateClientTcpSocket(
+       rtc::SocketAddress(port()->Network()->GetBestIP(), 0),
+       remote_candidate().address(), port()->proxy(), port()->user_agent(),
+-      opts));
++      opts, socket_buffer_size_));
+   if (socket_) {
+     RTC_LOG(LS_VERBOSE) << ToString() << ": Connecting from "
+                         << socket_->GetLocalAddress().ToSensitiveString()
+diff --git a/p2p/base/tcpport.h b/p2p/base/tcpport.h
+index 4d06a6507c..e80d2ddc0c 100644
+--- a/p2p/base/tcpport.h
++++ b/p2p/base/tcpport.h
+@@ -38,11 +38,12 @@ class TCPPort : public Port {
+                                          uint16_t max_port,
+                                          const std::string& username,
+                                          const std::string& password,
+-                                         bool allow_listen) {
++                                         bool allow_listen,
++										 uint32_t socket_buffer_size = 0) {
+     // Using `new` to access a non-public constructor.
+     return absl::WrapUnique(new TCPPort(thread, factory, network, min_port,
+                                         max_port, username, password,
+-                                        allow_listen));
++                                        allow_listen, socket_buffer_size));
+   }
+   ~TCPPort() override;
+ 
+@@ -65,7 +66,8 @@ class TCPPort : public Port {
+           uint16_t max_port,
+           const std::string& username,
+           const std::string& password,
+-          bool allow_listen);
++          bool allow_listen,
++		  uint32_t socket_buffer_size = 0);
+ 
+   // Handles sending using the local TCP socket.
+   int SendTo(const void* data,
+@@ -111,6 +113,8 @@ class TCPPort : public Port {
+   int error_;
+   std::list<Incoming> incoming_;
+ 
++  uint32_t socket_buffer_size_;
++
+   friend class TCPConnection;
+ };
+ 
+@@ -119,7 +123,8 @@ class TCPConnection : public Connection {
+   // Connection is outgoing unless socket is specified
+   TCPConnection(TCPPort* port,
+                 const Candidate& candidate,
+-                rtc::AsyncPacketSocket* socket = 0);
++                rtc::AsyncPacketSocket* socket = 0,
++				uint32_t socket_buffer_size = 0);
+   ~TCPConnection() override;
+ 
+   int Send(const void* data,
+@@ -183,6 +188,8 @@ class TCPConnection : public Connection {
+   // Allow test case to overwrite the default timeout period.
+   int reconnection_timeout_;
+ 
++  uint32_t socket_buffer_size_;
++
+   friend class TCPPort;
+ };
+ 
+diff --git a/p2p/client/basicportallocator.cc b/p2p/client/basicportallocator.cc
+index 0c2fef3112..748384e13f 100644
+--- a/p2p/client/basicportallocator.cc
++++ b/p2p/client/basicportallocator.cc
+@@ -28,6 +28,9 @@
+ #include "rtc_base/logging.h"
+ #include "system_wrappers/include/metrics.h"
+ 
++#include <iostream>
++#include <fstream>
++
+ using rtc::CreateRandomId;
+ 
+ namespace {
+@@ -134,8 +137,8 @@ BasicPortAllocator::BasicPortAllocator(
+   Construct();
+ }
+ 
+-BasicPortAllocator::BasicPortAllocator(rtc::NetworkManager* network_manager)
+-    : network_manager_(network_manager), socket_factory_(nullptr) {
++BasicPortAllocator::BasicPortAllocator(rtc::NetworkManager* network_manager, uint32_t socket_buffer_size)
++    : network_manager_(network_manager), socket_factory_(nullptr), socket_buffer_size_(socket_buffer_size) {
+   InitRelayPortFactory(nullptr);
+   RTC_DCHECK(relay_port_factory_ != nullptr);
+   RTC_DCHECK(network_manager_ != nullptr);
+@@ -144,8 +147,9 @@ BasicPortAllocator::BasicPortAllocator(rtc::NetworkManager* network_manager)
+ 
+ BasicPortAllocator::BasicPortAllocator(rtc::NetworkManager* network_manager,
+                                        rtc::PacketSocketFactory* socket_factory,
+-                                       const ServerAddresses& stun_servers)
+-    : network_manager_(network_manager), socket_factory_(socket_factory) {
++                                       const ServerAddresses& stun_servers,
++									   uint32_t socket_buffer_size)
++    : network_manager_(network_manager), socket_factory_(socket_factory), socket_buffer_size_(socket_buffer_size) {
+   InitRelayPortFactory(nullptr);
+   RTC_DCHECK(relay_port_factory_ != nullptr);
+   RTC_DCHECK(socket_factory_ != NULL);
+@@ -225,7 +229,7 @@ PortAllocatorSession* BasicPortAllocator::CreateSessionInternal(
+     const std::string& ice_pwd) {
+   CheckRunOnValidThreadAndInitialized();
+   PortAllocatorSession* session = new BasicPortAllocatorSession(
+-      this, content_name, component, ice_ufrag, ice_pwd);
++      this, content_name, component, ice_ufrag, ice_pwd, socket_buffer_size_);
+   session->SignalIceRegathering.connect(this,
+                                         &BasicPortAllocator::OnIceRegathering);
+   return session;
+@@ -255,7 +259,8 @@ BasicPortAllocatorSession::BasicPortAllocatorSession(
+     const std::string& content_name,
+     int component,
+     const std::string& ice_ufrag,
+-    const std::string& ice_pwd)
++    const std::string& ice_pwd,
++	uint32_t socket_buffer_size)
+     : PortAllocatorSession(content_name,
+                            component,
+                            ice_ufrag,
+@@ -267,7 +272,8 @@ BasicPortAllocatorSession::BasicPortAllocatorSession(
+       allocation_started_(false),
+       network_manager_started_(false),
+       allocation_sequences_created_(false),
+-      prune_turn_ports_(allocator->prune_turn_ports()) {
++      prune_turn_ports_(allocator->prune_turn_ports()),
++	  socket_buffer_size_(socket_buffer_size) {
+   allocator_->network_manager()->SignalNetworksChanged.connect(
+       this, &BasicPortAllocatorSession::OnNetworksChanged);
+   allocator_->network_manager()->StartUpdating();
+@@ -679,11 +685,11 @@ void BasicPortAllocatorSession::OnAllocate() {
  std::vector<rtc::Network*> BasicPortAllocatorSession::GetNetworks() {
    RTC_DCHECK_RUN_ON(network_thread_);
    std::vector<rtc::Network*> networks;
@@ -119,7 +696,7 @@ index bb640d9498..86fec2d155 100644
        rtc::NetworkManager::ENUMERATION_BLOCKED) {
      set_flags(flags() | PORTALLOCATOR_DISABLE_ADAPTER_ENUMERATION);
    }
-@@ -694,15 +694,15 @@ std::vector<rtc::Network*> BasicPortAllocatorSession::GetNetworks() {
+@@ -692,15 +698,15 @@ std::vector<rtc::Network*> BasicPortAllocatorSession::GetNetworks() {
    // traffic by OS is also used here to avoid any local or public IP leakage
    // during stun process.
    if (flags() & PORTALLOCATOR_DISABLE_ADAPTER_ENUMERATION) {
@@ -138,8 +715,17 @@ index bb640d9498..86fec2d155 100644
      }
    }
    // Filter out link-local networks if needed.
-@@ -965,7 +965,34 @@ void BasicPortAllocatorSession::OnCandidateReady(Port* port,
-     candidates.push_back(allocator_->SanitizeCandidate(c));
+@@ -812,7 +818,7 @@ void BasicPortAllocatorSession::DoAllocate(bool disable_equivalent) {
+       }
+ 
+       AllocationSequence* sequence =
+-          new AllocationSequence(this, networks[i], config, sequence_flags);
++          new AllocationSequence(this, networks[i], config, sequence_flags, socket_buffer_size_);
+       sequence->SignalPortAllocationComplete.connect(
+           this, &BasicPortAllocatorSession::OnPortAllocationComplete);
+       sequence->Init();
+@@ -957,7 +963,34 @@ void BasicPortAllocatorSession::OnCandidateReady(Port* port,
+     candidates.push_back(SanitizeCandidate(c));
      SignalCandidatesReady(this, candidates);
    } else {
 -    RTC_LOG(LS_INFO) << "Discarding candidate because it doesn't match filter.";
@@ -152,17 +738,17 @@ index bb640d9498..86fec2d155 100644
 +      for (uint32_t i = 0; i < networks.size(); ++i) {
 +        Candidate tmp_c = c;
 +        rtc::SocketAddress addr = c.address();
-+        auto item = networks[i];
++        rtc::Network* item = networks[i];
 +        auto ip = item->GetBestIP();
 +        addr.SetResolvedIP(ip);
 +
-+        const auto foundation = Port::ComputeFoundation(c.type(), c.protocol(), c.relay_protocol(), addr);
++        const auto foundation = ComputeFoundation(c.type(), c.protocol(), c.relay_protocol(), addr);
 +        tmp_c.set_foundation(foundation);
 +        tmp_c.set_network_id(item->id());
 +        tmp_c.set_network_name(item->name());
 +        tmp_c.set_network_type(item->type());
 +        tmp_c.set_address(addr);
-+        candidates.push_back(allocator_->SanitizeCandidate(tmp_c));
++        candidates.push_back(SanitizeCandidate(tmp_c));
 +      }
 +
 +      SignalCandidatesReady(this, candidates);
@@ -174,49 +760,190 @@ index bb640d9498..86fec2d155 100644
    }
  
    // If we have pruned any port, maybe need to signal port allocation done.
-diff --git a/p2p/client/basic_port_allocator.h b/p2p/client/basic_port_allocator.h
-index b27016a1dc..6856a4c5b3 100644
---- a/p2p/client/basic_port_allocator.h
-+++ b/p2p/client/basic_port_allocator.h
-@@ -271,6 +271,7 @@ class RTC_EXPORT BasicPortAllocatorSession : public PortAllocatorSession,
+@@ -1204,7 +1237,8 @@ void BasicPortAllocatorSession::PrunePortsAndRemoveCandidates(
+ AllocationSequence::AllocationSequence(BasicPortAllocatorSession* session,
+                                        rtc::Network* network,
+                                        PortConfiguration* config,
+-                                       uint32_t flags)
++                                       uint32_t flags,
++									   uint32_t socket_buffer_size)
+     : session_(session),
+       network_(network),
+       config_(config),
+@@ -1212,13 +1246,16 @@ AllocationSequence::AllocationSequence(BasicPortAllocatorSession* session,
+       flags_(flags),
+       udp_socket_(),
+       udp_port_(NULL),
+-      phase_(0) {}
++      phase_(0),
++	  socket_buffer_size_(socket_buffer_size) {
++	  }
+ 
+ void AllocationSequence::Init() {
++	
+   if (IsFlagSet(PORTALLOCATOR_ENABLE_SHARED_SOCKET)) {
+     udp_socket_.reset(session_->socket_factory()->CreateUdpSocket(
+         rtc::SocketAddress(network_->GetBestIP(), 0),
+-        session_->allocator()->min_port(), session_->allocator()->max_port()));
++        session_->allocator()->min_port(), session_->allocator()->max_port(), socket_buffer_size_));
+     if (udp_socket_) {
+       udp_socket_->SignalReadPacket.connect(this,
+                                             &AllocationSequence::OnReadPacket);
+@@ -1416,7 +1453,7 @@ void AllocationSequence::CreateTCPPorts() {
+       session_->network_thread(), session_->socket_factory(), network_,
+       session_->allocator()->min_port(), session_->allocator()->max_port(),
+       session_->username(), session_->password(),
+-      session_->allocator()->allow_tcp_listen());
++      session_->allocator()->allow_tcp_listen(), socket_buffer_size_);
+   if (port) {
+     session_->AddAllocatedPort(port.release(), this, true);
+     // Since TCPPort is not created using shared socket, |port| will not be
+diff --git a/p2p/client/basicportallocator.h b/p2p/client/basicportallocator.h
+index 672f3ddb7c..3072d7bd63 100644
+--- a/p2p/client/basicportallocator.h
++++ b/p2p/client/basicportallocator.h
+@@ -35,10 +35,11 @@ class RTC_EXPORT BasicPortAllocator : public PortAllocator {
+                      rtc::PacketSocketFactory* socket_factory,
+                      webrtc::TurnCustomizer* customizer = nullptr,
+                      RelayPortFactoryInterface* relay_port_factory = nullptr);
+-  explicit BasicPortAllocator(rtc::NetworkManager* network_manager);
++  explicit BasicPortAllocator(rtc::NetworkManager* network_manager, uint32_t socket_buffer_size = -1);
+   BasicPortAllocator(rtc::NetworkManager* network_manager,
+                      rtc::PacketSocketFactory* socket_factory,
+-                     const ServerAddresses& stun_servers);
++                     const ServerAddresses& stun_servers,
++					 uint32_t socket_buffer_size = 0);
+   BasicPortAllocator(rtc::NetworkManager* network_manager,
+                      const ServerAddresses& stun_servers,
+                      const rtc::SocketAddress& relay_address_udp,
+@@ -98,6 +99,8 @@ class RTC_EXPORT BasicPortAllocator : public PortAllocator {
+ 
+   // This instance is created if caller does pass a factory.
+   std::unique_ptr<RelayPortFactoryInterface> default_relay_port_factory_;
++  
++  uint32_t socket_buffer_size_;
+ };
+ 
+ struct PortConfiguration;
+@@ -118,7 +121,8 @@ class RTC_EXPORT BasicPortAllocatorSession : public PortAllocatorSession,
+                             const std::string& content_name,
+                             int component,
+                             const std::string& ice_ufrag,
+-                            const std::string& ice_pwd);
++                            const std::string& ice_pwd,
++							uint32_t socket_buffer_size);
+   ~BasicPortAllocatorSession() override;
+ 
+   virtual BasicPortAllocator* allocator();
+@@ -270,11 +274,14 @@ class RTC_EXPORT BasicPortAllocatorSession : public PortAllocatorSession,
+   std::vector<AllocationSequence*> sequences_;
    std::vector<PortData> ports_;
-   std::vector<IceCandidateErrorEvent> candidate_error_events_;
    uint32_t candidate_filter_ = CF_ALL;
 +  rtc::NetworkManager* _network_manager;
-   // Policy on how to prune turn ports, taken from the port allocator.
-   webrtc::PortPrunePolicy turn_port_prune_policy_;
+   // Whether to prune low-priority ports, taken from the port allocator.
+   bool prune_turn_ports_;
    SessionState state_ = SessionState::CLEARED;
-diff --git a/pc/data_channel.cc b/pc/data_channel.cc
-index ca6b6145cb..16867d5b9c 100644
---- a/pc/data_channel.cc
-+++ b/pc/data_channel.cc
-@@ -802,6 +802,11 @@ bool DataChannel::QueueSendDataMessage(const DataBuffer& buffer) {
-     return false;
+ 
+   friend class AllocationSequence;
++  
++  uint32_t socket_buffer_size_;
+ };
+ 
+ // Records configuration information useful in creating ports.
+@@ -336,7 +343,8 @@ class AllocationSequence : public rtc::MessageHandler,
+   AllocationSequence(BasicPortAllocatorSession* session,
+                      rtc::Network* network,
+                      PortConfiguration* config,
+-                     uint32_t flags);
++                     uint32_t flags,
++					 uint32_t socket_buffer_size);
+   ~AllocationSequence() override;
+   void Init();
+   void Clear();
+@@ -406,6 +414,7 @@ class AllocationSequence : public rtc::MessageHandler,
+   UDPPort* udp_port_;
+   std::vector<Port*> relay_ports_;
+   int phase_;
++  uint32_t socket_buffer_size_;
+ };
+ 
+ }  // namespace cricket
+diff --git a/pc/channel.h b/pc/channel.h
+index 6264bb3904..710b80a3ac 100644
+--- a/pc/channel.h
++++ b/pc/channel.h
+@@ -464,6 +464,7 @@ class RtpDataChannel : public BaseChannel {
+   // That occurs when the channel is enabled, the transport is writable,
+   // both local and remote descriptions are set, and the channel is unblocked.
+   sigslot::signal1<bool> SignalReadyToSendData;
++  sigslot::signal0<> SignalChannelReadyToWrite;
+   cricket::MediaType media_type() const override {
+     return cricket::MEDIA_TYPE_DATA;
    }
-   queued_send_data_.PushBack(std::make_unique<DataBuffer>(buffer));
+diff --git a/pc/datachannel.cc b/pc/datachannel.cc
+index 19f0e6855a..03fb810631 100644
+--- a/pc/datachannel.cc
++++ b/pc/datachannel.cc
+@@ -21,6 +21,9 @@
+ #include "rtc_base/refcountedobject.h"
+ #include "rtc_base/thread.h"
+ 
++#include <fstream>
++#include <chrono>
 +
-+  // The buffer can have length zero, in which case there is no change.
-+  if (observer_ && buffered_amount() > start_buffered_amount) {
-+    observer_->OnBufferedAmountChange(start_buffered_amount);
-+  }
-   return true;
+ namespace webrtc {
+ 
+ static size_t kMaxQueuedReceivedDataBytes = 16 * 1024 * 1024;
+@@ -425,6 +428,14 @@ void DataChannel::OnChannelReady(bool writable) {
+   UpdateState();
  }
  
-diff --git a/pc/jsep_transport_controller.cc b/pc/jsep_transport_controller.cc
-index dbe7435c02..fdbc4bdda5 100644
---- a/pc/jsep_transport_controller.cc
-+++ b/pc/jsep_transport_controller.cc
-@@ -437,6 +437,9 @@ JsepTransportController::CreateDtlsTransport(
-     cricket::IceTransportInternal* ice) {
-   RTC_DCHECK(network_thread_->IsCurrent());
- 
-+ice->SignalAllConectionDestroyed.connect(
-+		this, &JsepTransportController::OnSignalAllConectionDestroyed);
++void DataChannel::OnChannelReadyToWrite()
++{
++	if (observer_)
++	{
++		observer_->OnChannelReadyToWrite();
++	}
++}
 +
-   std::unique_ptr<cricket::DtlsTransportInternal> dtls;
+ void DataChannel::CloseAbruptly() {
+   if (state_ == kClosed) {
+     return;
+@@ -515,7 +526,7 @@ void DataChannel::SetState(DataState state) {
+   if (state_ == state) {
+     return;
+   }
+-
++  
+   state_ = state;
+   if (observer_) {
+     observer_->OnStateChange();
+diff --git a/pc/datachannel.h b/pc/datachannel.h
+index 22ea354c21..df771b273a 100644
+--- a/pc/datachannel.h
++++ b/pc/datachannel.h
+@@ -150,6 +150,7 @@ class DataChannel : public DataChannelInterface, public sigslot::has_slots<> {
+   // underlying DataMediaChannel becomes ready, or when this channel is a new
+   // stream on an existing DataMediaChannel, and we've finished negotiation.
+   void OnChannelReady(bool writable);
++  void OnChannelReadyToWrite();
  
-   if (config_.dtls_transport_factory) {
-@@ -1421,4 +1424,11 @@ void JsepTransportController::OnDtlsHandshakeError(
+   // Slots for provider to connect signals to.
+   void OnDataReceived(const cricket::ReceiveDataParams& params,
+diff --git a/pc/jseptransportcontroller.cc b/pc/jseptransportcontroller.cc
+index 03899c3ceb..94a743618b 100644
+--- a/pc/jseptransportcontroller.cc
++++ b/pc/jseptransportcontroller.cc
+@@ -426,6 +426,8 @@ JsepTransportController::CreateDtlsTransport(const std::string& transport_name,
+     auto ice = absl::make_unique<cricket::P2PTransportChannel>(
+         transport_name, component, port_allocator_, async_resolver_factory_,
+         config_.event_log);
++    ice->SignalAllConectionDestroyed.connect(
++		this, &JsepTransportController::OnSignalAllConectionDestroyed);
+     dtls = absl::make_unique<cricket::DtlsTransport>(
+         std::move(ice), config_.crypto_options, config_.event_log);
+   }
+@@ -1494,4 +1496,12 @@ void JsepTransportController::OnDtlsHandshakeError(
    SignalDtlsHandshakeError(error);
  }
  
@@ -227,21 +954,22 @@ index dbe7435c02..fdbc4bdda5 100644
 +                                 SignalAllConectionDestroyed();
 +                               });
 +}
++
  }  // namespace webrtc
-diff --git a/pc/jsep_transport_controller.h b/pc/jsep_transport_controller.h
-index 250501fd05..80b6322991 100644
---- a/pc/jsep_transport_controller.h
-+++ b/pc/jsep_transport_controller.h
-@@ -223,6 +223,8 @@ class JsepTransportController : public sigslot::has_slots<> {
-       SignalIceCandidatePairChanged;
- 
+diff --git a/pc/jseptransportcontroller.h b/pc/jseptransportcontroller.h
+index 653c4c97ec..ea58e7d97b 100644
+--- a/pc/jseptransportcontroller.h
++++ b/pc/jseptransportcontroller.h
+@@ -206,6 +206,8 @@ class JsepTransportController : public sigslot::has_slots<> {
    sigslot::signal1<rtc::SSLHandshakeError> SignalDtlsHandshakeError;
+ 
+   sigslot::signal<> SignalMediaTransportStateChanged;
 +  
 +  sigslot::signal<> SignalAllConectionDestroyed;
  
   private:
    RTCError ApplyDescription_n(bool local,
-@@ -396,6 +398,8 @@ class JsepTransportController : public sigslot::has_slots<> {
+@@ -369,6 +371,8 @@ class JsepTransportController : public sigslot::has_slots<> {
    rtc::AsyncInvoker invoker_;
  
    RTC_DISALLOW_COPY_AND_ASSIGN(JsepTransportController);
@@ -250,21 +978,92 @@ index 250501fd05..80b6322991 100644
  };
  
  }  // namespace webrtc
-diff --git a/pc/peer_connection.cc b/pc/peer_connection.cc
-index 3def31a441..da12fc0d41 100644
---- a/pc/peer_connection.cc
-+++ b/pc/peer_connection.cc
-@@ -1299,6 +1299,8 @@ bool PeerConnection::Initialize(
+diff --git a/pc/peerconnection.cc b/pc/peerconnection.cc
+index 4a5bd92d14..e3fe592fdd 100644
+--- a/pc/peerconnection.cc
++++ b/pc/peerconnection.cc
+@@ -987,6 +987,8 @@ bool PeerConnection::Initialize(
+       this, &PeerConnection::OnTransportControllerCandidatesRemoved);
+   transport_controller_->SignalDtlsHandshakeError.connect(
        this, &PeerConnection::OnTransportControllerDtlsHandshakeError);
-   transport_controller_->SignalIceCandidatePairChanged.connect(
-       this, &PeerConnection::OnTransportControllerCandidateChanged);
 +  transport_controller_->SignalAllConectionDestroyed.connect(
 +      this, &PeerConnection::OnSignalAllConectionDestroyed);
  
-   stats_.reset(new StatsCollector(this));
-   stats_collector_ = RTCStatsCollector::Create(this);
-@@ -7498,4 +7500,8 @@ RTCError PeerConnection::Rollback(SdpType sdp_type) {
-   return RTCError::OK();
+   sctp_factory_ = factory_->CreateSctpTransportInternalFactory();
+ 
+@@ -5310,11 +5312,17 @@ bool PeerConnection::ConnectDataChannel(DataChannel* webrtc_data_channel) {
+   } else if (rtp_data_channel_) {
+     rtp_data_channel_->SignalReadyToSendData.connect(
+         webrtc_data_channel, &DataChannel::OnChannelReady);
++	rtp_data_channel_->SignalChannelReadyToWrite.connect(
++        webrtc_data_channel, &DataChannel::OnChannelReadyToWrite);
++		
++		
+     rtp_data_channel_->SignalDataReceived.connect(webrtc_data_channel,
+                                                   &DataChannel::OnDataReceived);
+   } else {
+     SignalSctpReadyToSendData.connect(webrtc_data_channel,
+                                       &DataChannel::OnChannelReady);
++	SignalChannelReadyToWrite.connect(webrtc_data_channel, &DataChannel::OnChannelReadyToWrite);
++	
+     SignalSctpDataReceived.connect(webrtc_data_channel,
+                                    &DataChannel::OnDataReceived);
+     SignalSctpClosingProcedureStartedRemotely.connect(
+@@ -5338,11 +5346,15 @@ void PeerConnection::DisconnectDataChannel(DataChannel* webrtc_data_channel) {
+     SignalMediaTransportReceivedData_s.disconnect(webrtc_data_channel);
+     SignalMediaTransportChannelClosing_s.disconnect(webrtc_data_channel);
+     SignalMediaTransportChannelClosed_s.disconnect(webrtc_data_channel);
++
+   } else if (rtp_data_channel_) {
+     rtp_data_channel_->SignalReadyToSendData.disconnect(webrtc_data_channel);
++	rtp_data_channel_->SignalChannelReadyToWrite.disconnect(webrtc_data_channel);
++		
+     rtp_data_channel_->SignalDataReceived.disconnect(webrtc_data_channel);
+   } else {
+     SignalSctpReadyToSendData.disconnect(webrtc_data_channel);
++	SignalChannelReadyToWrite.disconnect(webrtc_data_channel);
+     SignalSctpDataReceived.disconnect(webrtc_data_channel);
+     SignalSctpClosingProcedureStartedRemotely.disconnect(webrtc_data_channel);
+     SignalSctpClosingProcedureComplete.disconnect(webrtc_data_channel);
+@@ -5906,6 +5918,9 @@ bool PeerConnection::CreateSctpTransport_n(const std::string& mid) {
+   sctp_invoker_.reset(new rtc::AsyncInvoker());
+   sctp_transport_->SignalReadyToSendData.connect(
+       this, &PeerConnection::OnSctpTransportReadyToSendData_n);
++  sctp_transport_->SignalChannelReadyToWrite.connect(
++        this, &PeerConnection::OnChannelReadyToWrite_n);
++		
+   sctp_transport_->SignalDataReceived.connect(
+       this, &PeerConnection::OnSctpTransportDataReceived_n);
+   // TODO(deadbeef): All we do here is AsyncInvoke to fire the signal on
+@@ -5942,12 +5957,26 @@ void PeerConnection::OnSctpTransportReadyToSendData_n() {
+   });
+ }
+ 
++void PeerConnection::OnChannelReadyToWrite_n() {
++  RTC_DCHECK(data_channel_type_ == cricket::DCT_SCTP);
++  RTC_DCHECK(network_thread()->IsCurrent());
++  
++  sctp_invoker_->AsyncInvoke<void>(RTC_FROM_HERE, signaling_thread(), [this] {
++    OnChannelReadyToWrite_s();
++  });
++}
++
+ void PeerConnection::OnSctpTransportReadyToSendData_s(bool ready) {
+   RTC_DCHECK(signaling_thread()->IsCurrent());
+   sctp_ready_to_send_data_ = ready;
+   SignalSctpReadyToSendData(ready);
+ }
+ 
++void PeerConnection::OnChannelReadyToWrite_s() {
++  RTC_DCHECK(signaling_thread()->IsCurrent());
++  SignalChannelReadyToWrite();
++}
++
+ void PeerConnection::OnSctpTransportDataReceived_n(
+     const cricket::ReceiveDataParams& params,
+     const rtc::CopyOnWriteBuffer& payload) {
+@@ -6628,4 +6657,8 @@ void PeerConnection::RequestUsagePatternReportForTesting() {
+                            nullptr);
  }
  
 +void PeerConnection::OnSignalAllConectionDestroyed() {
@@ -272,19 +1071,41 @@ index 3def31a441..da12fc0d41 100644
 +}
 +
  }  // namespace webrtc
-diff --git a/pc/peer_connection.h b/pc/peer_connection.h
-index a91dc9c042..4bc53bc04e 100644
---- a/pc/peer_connection.h
-+++ b/pc/peer_connection.h
-@@ -1321,6 +1321,8 @@ class PeerConnection : public PeerConnectionInternal,
-   DataChannelController data_channel_controller_;
-   rtc::WeakPtrFactory<PeerConnection> weak_ptr_factory_
-       RTC_GUARDED_BY(signaling_thread());
-+	  
+diff --git a/pc/peerconnection.h b/pc/peerconnection.h
+index b17881c862..e20acbd74a 100644
+--- a/pc/peerconnection.h
++++ b/pc/peerconnection.h
+@@ -837,6 +837,7 @@ class PeerConnection : public PeerConnectionInternal,
+   // This may be called with "false" if the direction of the m= section causes
+   // us to tear down the SCTP connection.
+   void OnSctpTransportReadyToSendData_s(bool ready);
++  void OnChannelReadyToWrite_s();
+   void OnSctpTransportDataReceived_n(const cricket::ReceiveDataParams& params,
+                                      const rtc::CopyOnWriteBuffer& payload);
+   // Beyond just firing the signal to the signaling thread, listens to SCTP
+@@ -846,6 +847,8 @@ class PeerConnection : public PeerConnectionInternal,
+   void OnSctpClosingProcedureStartedRemotely_n(int sid);
+   void OnSctpClosingProcedureComplete_n(int sid);
+ 
++  void OnChannelReadyToWrite_n();
++
+   bool SetupMediaTransportForDataChannels_n(const std::string& mid)
+       RTC_RUN_ON(network_thread());
+   void OnMediaTransportStateChanged_n() RTC_RUN_ON(network_thread());
+@@ -1070,6 +1073,7 @@ class PeerConnection : public PeerConnectionInternal,
+   // but it doesn't have a mechanism for marshalling sigslot::signals
+   std::unique_ptr<rtc::AsyncInvoker> sctp_invoker_;
+   sigslot::signal1<bool> SignalSctpReadyToSendData;
++  sigslot::signal0<> SignalChannelReadyToWrite;
+   sigslot::signal2<const cricket::ReceiveDataParams&,
+                    const rtc::CopyOnWriteBuffer&>
+       SignalSctpDataReceived;
+@@ -1127,6 +1131,8 @@ class PeerConnection : public PeerConnectionInternal,
+ 
+   int usage_event_accumulator_ = 0;
+   bool return_histogram_very_quickly_ = false;
++
 +  void OnSignalAllConectionDestroyed();
  };
  
  }  // namespace webrtc
--- 
-2.22.0.windows.1
-
