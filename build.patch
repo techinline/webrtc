@@ -1,18 +1,18 @@
 diff --git a/config/BUILD.gn b/config/BUILD.gn
-index d0517299b..3b01e08f3 100644
+index 10f2fc8ad..e69cdf13c 100644
 --- a/config/BUILD.gn
 +++ b/config/BUILD.gn
-@@ -119,7 +119,7 @@ config("feature_flags") {
+@@ -155,7 +155,7 @@ config("feature_flags") {
  
  config("debug") {
    defines = [
 -    "_DEBUG",
 +    "NDEBUG",
      "DYNAMIC_ANNOTATIONS_ENABLED=1",
+     "WTF_USE_DYNAMIC_ANNOTATIONS=1",
    ]
- 
-@@ -131,7 +131,7 @@ config("debug") {
-     if (!enable_iterator_debugging && !use_custom_libcxx) {
+@@ -168,7 +168,7 @@ config("debug") {
+     if (!enable_iterator_debugging) {
        # Iterator debugging is enabled by default by the compiler on debug
        # builds, and we have to tell it to turn it off.
 -      defines += [ "_HAS_ITERATOR_DEBUGGING=0" ]
@@ -21,11 +21,11 @@ index d0517299b..3b01e08f3 100644
    } else if (is_linux && current_cpu == "x64" && enable_iterator_debugging) {
      # Enable libstdc++ debugging facilities to help catch problems early, see
 diff --git a/config/win/BUILD.gn b/config/win/BUILD.gn
-index bd5f8a8ed..dec50a601 100644
+index f27f192e3..42db46918 100644
 --- a/config/win/BUILD.gn
 +++ b/config/win/BUILD.gn
-@@ -470,9 +470,9 @@ config("default_crt") {
- # defining _DEBUG.
+@@ -449,9 +449,9 @@ config("default_crt") {
+ # _DEBUG.
  config("release_crt") {
    if (is_component_build) {
 -    cflags = [ "/MD" ]
@@ -36,7 +36,7 @@ index bd5f8a8ed..dec50a601 100644
    }
  }
  
-@@ -488,9 +488,9 @@ config("dynamic_crt") {
+@@ -467,9 +467,9 @@ config("dynamic_crt") {
  config("static_crt") {
    if (is_debug) {
      # This pulls in the static debug CRT and defines _DEBUG
@@ -48,6 +48,3 @@ index bd5f8a8ed..dec50a601 100644
    }
  }
  
--- 
-2.22.0.windows.1
-
