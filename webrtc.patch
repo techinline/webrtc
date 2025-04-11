@@ -11,20 +11,21 @@ index 7cb5582233..628626a344 100644
   protected:
    virtual ~DataChannelObserver() = default;
 diff --git a/api/peerconnectioninterface.h b/api/peerconnectioninterface.h
-index 4a7b051b33..3aa891bcee 100644
+index 4a7b051b33..8b827bdcef 100644
 --- a/api/peerconnectioninterface.h
 +++ b/api/peerconnectioninterface.h
-@@ -1176,6 +1176,8 @@ class PeerConnectionObserver {
+@@ -1176,6 +1176,9 @@ class PeerConnectionObserver {
    // The heuristics for defining what constitutes "interesting" are
    // implementation-defined.
    virtual void OnInterestingUsage(int usage_pattern) {}
 +
 +  virtual void OnAllConnectionDestroyed() {}
++  virtual void OnAddrUnreachable() {}
  };
  
  // PeerConnectionDependencies holds all of PeerConnections dependencies.
 diff --git a/media/sctp/sctptransport.cc b/media/sctp/sctptransport.cc
-index 4ffaaf7f5a..aab43b73ac 100644
+index 4ffaaf7f5a..827753f2cc 100644
 --- a/media/sctp/sctptransport.cc
 +++ b/media/sctp/sctptransport.cc
 @@ -41,6 +41,11 @@ enum PreservedErrno {
@@ -145,6 +146,20 @@ index 4ffaaf7f5a..aab43b73ac 100644
  }
  
  sockaddr_conn SctpTransport::GetSctpSockAddr(int port) {
+@@ -1017,6 +1061,13 @@ void SctpTransport::OnNotificationFromSctp(
+       // error recovery.  It doesn't seem likely to occur, and if so, likely
+       // harmless within the lifetime of a single SCTP association.
+       break;
++    case SCTP_PEER_ADDR_CHANGE: {
++      const struct sctp_paddr_change* paddr_chg = &notification.sn_paddr_change;
++      if (paddr_chg->spc_state == SCTP_ADDR_UNREACHABLE) {
++        SignalAddrUnreachable();
++      }
++      break;
++    }
+     default:
+       RTC_LOG(LS_WARNING) << "Unknown SCTP event: "
+                           << notification.sn_header.sn_type;
 diff --git a/media/sctp/sctptransport.h b/media/sctp/sctptransport.h
 index 5c2a750e4f..d079cc9337 100644
 --- a/media/sctp/sctptransport.h
@@ -180,15 +195,16 @@ index 5c2a750e4f..d079cc9337 100644
    // incoming/outgoing streams with matching IDs). It's specifically used to
    // keep track of the status of resets, but more information could be put here
 diff --git a/media/sctp/sctptransportinternal.h b/media/sctp/sctptransportinternal.h
-index 4c3b542a52..374f3206b4 100644
+index 4c3b542a52..a0410841ac 100644
 --- a/media/sctp/sctptransportinternal.h
 +++ b/media/sctp/sctptransportinternal.h
-@@ -107,6 +107,8 @@ class SctpTransportInternal {
+@@ -107,6 +107,9 @@ class SctpTransportInternal {
    virtual bool ReadyToSendData() = 0;
  
    sigslot::signal0<> SignalReadyToSendData;
 +  
 +  sigslot::signal0<> SignalChannelReadyToWrite;
++  sigslot::signal0<> SignalAddrUnreachable;
    // ReceiveDataParams includes SID, seq num, timestamp, etc. CopyOnWriteBuffer
    // contains message payload.
    sigslot::signal2<const ReceiveDataParams&, const rtc::CopyOnWriteBuffer&>
@@ -616,7 +632,7 @@ index 4d06a6507c..e80d2ddc0c 100644
  };
  
 diff --git a/p2p/client/basicportallocator.cc b/p2p/client/basicportallocator.cc
-index 0c2fef3112..748384e13f 100644
+index 0c2fef3112..7b8b410cc7 100644
 --- a/p2p/client/basicportallocator.cc
 +++ b/p2p/client/basicportallocator.cc
 @@ -28,6 +28,9 @@
@@ -979,7 +995,7 @@ index 653c4c97ec..ea58e7d97b 100644
  
  }  // namespace webrtc
 diff --git a/pc/peerconnection.cc b/pc/peerconnection.cc
-index 4a5bd92d14..e3fe592fdd 100644
+index 4a5bd92d14..f9e9166e29 100644
 --- a/pc/peerconnection.cc
 +++ b/pc/peerconnection.cc
 @@ -987,6 +987,8 @@ bool PeerConnection::Initialize(
@@ -1025,17 +1041,19 @@ index 4a5bd92d14..e3fe592fdd 100644
      SignalSctpDataReceived.disconnect(webrtc_data_channel);
      SignalSctpClosingProcedureStartedRemotely.disconnect(webrtc_data_channel);
      SignalSctpClosingProcedureComplete.disconnect(webrtc_data_channel);
-@@ -5906,6 +5918,9 @@ bool PeerConnection::CreateSctpTransport_n(const std::string& mid) {
+@@ -5906,6 +5918,11 @@ bool PeerConnection::CreateSctpTransport_n(const std::string& mid) {
    sctp_invoker_.reset(new rtc::AsyncInvoker());
    sctp_transport_->SignalReadyToSendData.connect(
        this, &PeerConnection::OnSctpTransportReadyToSendData_n);
 +  sctp_transport_->SignalChannelReadyToWrite.connect(
 +        this, &PeerConnection::OnChannelReadyToWrite_n);
++  sctp_transport_->SignalAddrUnreachable.connect(
++        this, &PeerConnection::OnAddrUnreachable);
 +		
    sctp_transport_->SignalDataReceived.connect(
        this, &PeerConnection::OnSctpTransportDataReceived_n);
    // TODO(deadbeef): All we do here is AsyncInvoke to fire the signal on
-@@ -5942,12 +5957,26 @@ void PeerConnection::OnSctpTransportReadyToSendData_n() {
+@@ -5942,12 +5959,35 @@ void PeerConnection::OnSctpTransportReadyToSendData_n() {
    });
  }
  
@@ -1045,6 +1063,15 @@ index 4a5bd92d14..e3fe592fdd 100644
 +  
 +  sctp_invoker_->AsyncInvoke<void>(RTC_FROM_HERE, signaling_thread(), [this] {
 +    OnChannelReadyToWrite_s();
++  });
++}
++
++void PeerConnection::OnAddrUnreachable() {
++  RTC_DCHECK(data_channel_type_ == cricket::DCT_SCTP);
++  RTC_DCHECK(network_thread()->IsCurrent());
++
++  sctp_invoker_->AsyncInvoke<void>(RTC_FROM_HERE, signaling_thread(), [this] {
++    Observer()->OnAddrUnreachable();
 +  });
 +}
 +
@@ -1062,7 +1089,7 @@ index 4a5bd92d14..e3fe592fdd 100644
  void PeerConnection::OnSctpTransportDataReceived_n(
      const cricket::ReceiveDataParams& params,
      const rtc::CopyOnWriteBuffer& payload) {
-@@ -6628,4 +6657,8 @@ void PeerConnection::RequestUsagePatternReportForTesting() {
+@@ -6628,4 +6668,8 @@ void PeerConnection::RequestUsagePatternReportForTesting() {
                             nullptr);
  }
  
@@ -1072,7 +1099,7 @@ index 4a5bd92d14..e3fe592fdd 100644
 +
  }  // namespace webrtc
 diff --git a/pc/peerconnection.h b/pc/peerconnection.h
-index b17881c862..e20acbd74a 100644
+index b17881c862..2b0a67867f 100644
 --- a/pc/peerconnection.h
 +++ b/pc/peerconnection.h
 @@ -837,6 +837,7 @@ class PeerConnection : public PeerConnectionInternal,
@@ -1083,16 +1110,17 @@ index b17881c862..e20acbd74a 100644
    void OnSctpTransportDataReceived_n(const cricket::ReceiveDataParams& params,
                                       const rtc::CopyOnWriteBuffer& payload);
    // Beyond just firing the signal to the signaling thread, listens to SCTP
-@@ -846,6 +847,8 @@ class PeerConnection : public PeerConnectionInternal,
+@@ -846,6 +847,9 @@ class PeerConnection : public PeerConnectionInternal,
    void OnSctpClosingProcedureStartedRemotely_n(int sid);
    void OnSctpClosingProcedureComplete_n(int sid);
  
 +  void OnChannelReadyToWrite_n();
++  void OnAddrUnreachable();
 +
    bool SetupMediaTransportForDataChannels_n(const std::string& mid)
        RTC_RUN_ON(network_thread());
    void OnMediaTransportStateChanged_n() RTC_RUN_ON(network_thread());
-@@ -1070,6 +1073,7 @@ class PeerConnection : public PeerConnectionInternal,
+@@ -1070,6 +1074,7 @@ class PeerConnection : public PeerConnectionInternal,
    // but it doesn't have a mechanism for marshalling sigslot::signals
    std::unique_ptr<rtc::AsyncInvoker> sctp_invoker_;
    sigslot::signal1<bool> SignalSctpReadyToSendData;
@@ -1100,7 +1128,7 @@ index b17881c862..e20acbd74a 100644
    sigslot::signal2<const cricket::ReceiveDataParams&,
                     const rtc::CopyOnWriteBuffer&>
        SignalSctpDataReceived;
-@@ -1127,6 +1131,8 @@ class PeerConnection : public PeerConnectionInternal,
+@@ -1127,6 +1132,8 @@ class PeerConnection : public PeerConnectionInternal,
  
    int usage_event_accumulator_ = 0;
    bool return_histogram_very_quickly_ = false;
